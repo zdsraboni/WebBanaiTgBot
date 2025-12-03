@@ -1,12 +1,15 @@
 import http from "http";
 import fetch from "node-fetch";
 import fs from "fs";
-import { exec } from "child_process";
+import path from "path";
+import ytDlp from "yt-dlp-exec";
+import ffmpegPath from "ffmpeg-static";
 import FormData from "form-data";
 
 const TOKEN = process.env.BOT_TOKEN;
 const API = `https://api.telegram.org/bot${TOKEN}`;
 
+// Send text message
 async function sendMessage(chatId, text) {
     await fetch(`${API}/sendMessage`, {
         method: "POST",
@@ -15,7 +18,7 @@ async function sendMessage(chatId, text) {
     });
 }
 
-// Send file to user
+// Send file to Telegram
 async function sendDocument(chatId, filePath) {
     const form = new FormData();
     form.append("chat_id", chatId);
@@ -34,12 +37,11 @@ const server = http.createServer(async (req, res) => {
         req.on("end", async () => {
             try {
                 const update = JSON.parse(body);
-
                 if (update.message) {
                     const chatId = update.message.chat.id;
                     const text = update.message.text;
 
-                    // COMMAND HANDLER
+                    // Commands
                     if (text === "/start") {
                         await sendMessage(chatId, "👋 Welcome! Send /help to see commands.");
                     } else if (text === "/help") {
@@ -53,29 +55,25 @@ const server = http.createServer(async (req, res) => {
                         } else {
                             await sendMessage(chatId, "⏳ Processing your download, please wait...");
 
-                            // Generate unique temporary file name
-                            const fileName = `media_${Date.now()}.mp4`;
+                            const tmpFile = path.join("/tmp", `media_${Date.now()}.mp4`);
 
-                            // Download using yt-dlp
-                            exec(`yt-dlp -o ${fileName} ${url}`, async (error, stdout, stderr) => {
-                                if (error) {
-                                    console.error("Download error:", error.message);
-                                    await sendMessage(chatId, `❌ Error downloading media:\n${error.message}`);
-                                    return;
-                                }
+                            try {
+                                // Download using yt-dlp-exec
+                                await ytDlp(url, {
+                                    output: tmpFile,
+                                    ffmpegLocation: ffmpegPath,
+                                });
 
-                                // Send file to Telegram
-                                try {
-                                    await sendDocument(chatId, fileName);
-                                    await sendMessage(chatId, `✅ Download complete and sent to you!`);
-                                } catch (e) {
-                                    console.error("Send file error:", e);
-                                    await sendMessage(chatId, `❌ Error sending file to Telegram.`);
-                                }
+                                // Send file
+                                await sendDocument(chatId, tmpFile);
+                                await sendMessage(chatId, "✅ Download complete and sent to you!");
 
                                 // Delete temporary file
-                                fs.unlink(fileName, () => {});
-                            });
+                                fs.unlink(tmpFile, () => {});
+                            } catch (err) {
+                                console.error("Download/send error:", err);
+                                await sendMessage(chatId, `❌ Error downloading or sending media:\n${err.message}`);
+                            }
                         }
                     } else {
                         await sendMessage(chatId, "❌ Unknown command or URL. Use /help to see commands.");
@@ -84,7 +82,6 @@ const server = http.createServer(async (req, res) => {
             } catch (e) {
                 console.error("Error processing update:", e);
             }
-
             res.writeHead(200);
             res.end("OK");
         });
