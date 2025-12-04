@@ -20,100 +20,128 @@ const app = express();
 const downloadDir = path.join(__dirname, 'downloads');
 if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir);
 
-// Regex
+// --- MIRROR LIST ---
+// If Reddit blocks Render, we ask these guys for the data instead.
+const REDDIT_MIRRORS = [
+    'https://redlib.catsarch.com',
+    'https://redlib.vlingit.com',
+    'https://redlib.tux.pizza',
+    'https://libreddit.kavin.rocks',
+    'https://old.reddit.com' // Last resort
+];
+
+// Regex for Links
 const URL_REGEX = /(https?:\/\/(?:www\.|old\.|mobile\.)?(?:reddit\.com|x\.com|twitter\.com)\/[^\s]+)/i;
 
-// --- UTILITIES ---
+// --- CORE FUNCTIONS ---
 
-// 1. Resolve Short Links (/s/)
-const resolveRedirect = async (url) => {
-    if (!url.includes('/s/')) return url;
+// 1. Resolve Redirects (Fixes /s/ links)
+const resolveUrl = async (shortUrl) => {
+    if (!shortUrl.includes('/s/')) return shortUrl;
     try {
-        const res = await axios.head(url, {
+        // We use a simple HEAD request to get the real location
+        const res = await axios.head(shortUrl, {
             maxRedirects: 0,
-            validateStatus: (status) => status >= 300 && status < 400,
-            headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 10)' }
+            validateStatus: (s) => s >= 300 && s < 400,
+            headers: { 'User-Agent': 'Mozilla/5.0 (Android 10; Mobile; rv:68.0) Gecko/68.0 Firefox/68.0' }
         });
-        return res.headers.location || url;
+        return res.headers.location || shortUrl;
     } catch (e) {
-        return url;
+        return shortUrl;
     }
 };
 
-// 2. Fallback: Get Direct Video Link via JSON API
-// This bypasses the main reddit.com block
-const getRedditDirectMap = async (webUrl) => {
-    try {
-        // Clean URL params
-        const cleanUrl = webUrl.split('?')[0];
-        const jsonUrl = cleanUrl.endsWith('/') ? `${cleanUrl}.json` : `${cleanUrl}/.json`;
-        
-        console.log("⚠️ Accessing API:", jsonUrl);
-        
-        const { data } = await axios.get(jsonUrl, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-        });
+// 2. The "Mirror" Bypass Strategy
+const fetchMetadataFromMirrors = async (originalUrl) => {
+    // Clean the URL path
+    const urlObj = new URL(originalUrl);
+    const path = urlObj.pathname; // e.g., /r/funny/comments/xyz/...
 
-        const post = data[0].data.children[0].data;
-        
-        if (post.secure_media && post.secure_media.reddit_video) {
-            // Found a video! v.redd.it links are NOT blocked by 403
-            return {
-                title: post.title,
-                url: post.secure_media.reddit_video.fallback_url,
-                is_video: true
-            };
-        } 
-        return null;
-    } catch (e) {
-        console.error("API Error:", e.message);
-        return null;
+    // Try each mirror until one works
+    for (const domain of REDDIT_MIRRORS) {
+        try {
+            const mirrorUrl = `${domain}${path}.json`;
+            console.log(`🛡️ Trying Mirror: ${mirrorUrl}`);
+
+            const { data } = await axios.get(mirrorUrl, {
+                timeout: 5000,
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+            });
+
+            // Extract Post Data
+            const post = data[0].data.children[0].data;
+            
+            // Check if it's a video
+            if (post.is_video && post.media && post.media.reddit_video) {
+                return {
+                    title: post.title,
+                    // The fallback_url is usually the direct v.redd.it link
+                    url: post.media.reddit_video.fallback_url.split('?')[0], 
+                    is_video: true
+                };
+            } else if (post.url && post.url.includes('v.redd.it')) {
+                 return { title: post.title, url: post.url, is_video: true };
+            } else if (post.preview && post.preview.reddit_video_preview) {
+                 return { title: post.title, url: post.preview.reddit_video_preview.fallback_url, is_video: true };
+            }
+        } catch (e) {
+            console.log(`❌ Mirror ${domain} failed: ${e.message}`);
+            continue; // Try next mirror
+        }
     }
+    return null; // All mirrors failed
 };
 
 // 3. Downloader
-const runYtDlp = async (targetUrl) => {
-    const cmd = `yt-dlp --force-ipv4 --no-warnings --no-playlist -J "${targetUrl}"`;
+const runYtDlp = async (url) => {
+    // We try to download. If it's a direct v.redd.it link, yt-dlp handles it perfectly even if Reddit blocks metadata.
+    const cmd = `yt-dlp --force-ipv4 --no-warnings --no-playlist -J "${url}"`;
     return await execPromise(cmd);
 };
 
 // --- HANDLERS ---
 
-bot.start((ctx) => ctx.reply("👋 Bot Online. Send a link!"));
+bot.start((ctx) => ctx.reply("👋 Ready! Send me a link. I use mirrors to bypass blocks."));
 
 bot.on('text', async (ctx) => {
     const match = ctx.message.text.match(URL_REGEX);
     if (!match) return;
 
-    const msg = await ctx.reply("🔍 *Processing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
+    const msg = await ctx.reply("🔍 *Bypassing blocks...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
-        let url = await resolveRedirect(match[0]);
-        let info;
-        let directUrl = url;
+        let targetUrl = await resolveUrl(match[0]);
+        let info = null;
+        let downloadUrl = targetUrl;
 
-        // TRY 1: Normal Download
-        try {
-            const { stdout } = await runYtDlp(url);
+        // STRATEGY A: Try Direct (Might work for X.com/Twitter)
+        if (targetUrl.includes('x.com') || targetUrl.includes('twitter.com')) {
+            const { stdout } = await runYtDlp(targetUrl);
             info = JSON.parse(stdout);
-        } catch (err) {
-            // TRY 2: If Blocked, Use API Fallback
-            if (err.stderr && (err.stderr.includes('403') || err.stderr.includes('HTTP Error'))) {
-                const apiData = await getRedditDirectMap(url);
-                if (apiData && apiData.is_video) {
-                    info = { title: apiData.title, formats: [], extractor_key: 'RedditAPI' };
-                    directUrl = apiData.url; // This is the unblocked v.redd.it link
-                } else {
-                    throw err; // Real error
-                }
+        } else {
+            // STRATEGY B: Reddit Mirror Bypass
+            console.log("🕵️ Activating Reddit Mirror Bypass...");
+            const mirrorData = await fetchMetadataFromMirrors(targetUrl);
+            
+            if (mirrorData) {
+                console.log("✅ Found video via mirror:", mirrorData.url);
+                downloadUrl = mirrorData.url; // This is the unblocked v.redd.it link
+                info = {
+                    title: mirrorData.title,
+                    formats: [], // Dummy formats, we force 'best' later
+                    extractor_key: 'RedditMirror'
+                };
             } else {
-                throw err;
+                // If mirrors fail, try one last desperation attempts with yt-dlp direct
+                const { stdout } = await runYtDlp(targetUrl);
+                info = JSON.parse(stdout);
             }
         }
 
-        // Generate Buttons
+        // Build Buttons
         const buttons = [];
         if (info.formats && info.formats.length > 0) {
+            // Standard selector for Twitter/X
             const formats = info.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height);
             const seen = new Set();
             formats.slice(0, 5).forEach(f => {
@@ -123,21 +151,21 @@ bot.on('text', async (ctx) => {
                 }
             });
         } else {
-            // Fallback Button (Downloads 'best' from direct link)
+            // Fallback for Reddit (Since we got direct link)
             buttons.push([Markup.button.callback("📹 Download Video", `v|best|best`)]);
         }
         buttons.push([Markup.button.callback("🎵 Audio Only", "a|best|audio")]);
 
-        // Hide DIRECT URL in message for later retrieval
+        // IMPORTANT: We store the safe 'downloadUrl' in the message
         await ctx.telegram.editMessageText(
             ctx.chat.id, msg.message_id, null,
-            `✅ *${info.title.substring(0, 50)}...*\nSource: [Link](${directUrl})`,
+            `✅ *${info.title.substring(0, 50)}...*\nSource: [Link](${downloadUrl})`,
             { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
         );
 
     } catch (err) {
-        console.error("Handler Error:", err);
-        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed. The media might be deleted or private.");
+        console.error("Main Error:", err.message);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed. All mirrors and direct access blocked.");
     }
 });
 
@@ -159,7 +187,7 @@ bot.on('callback_query', async (ctx) => {
         if (type === 'a') {
             cmd = `yt-dlp --force-ipv4 --no-warnings -x --audio-format mp3 -o "${basePath}.%(ext)s" "${url}"`;
         } else {
-            // If using direct link, format selector might need to be simple
+            // If it's a direct link (v.redd.it), 'best' is the safest option
             const fmt = id === 'best' ? 'best' : `${id}+bestaudio/best`;
             cmd = `yt-dlp --force-ipv4 --no-warnings -f "${fmt}" --merge-output-format mp4 -o "${basePath}.%(ext)s" "${url}"`;
         }
@@ -184,18 +212,18 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
-// --- SERVER SETUP (Fixes Website Error) ---
-app.get('/', (req, res) => res.send('✅ Bot is Alive!'));
+// --- SERVER SETUP ---
+// This path '/' handles the "Access Denied" browser error
+app.get('/', (req, res) => {
+    res.status(200).send('✅ Bot is Alive and Running!');
+});
 
+// Webhook Setup
 if (process.env.NODE_ENV === 'production') {
     app.use(bot.webhookCallback('/bot'));
     bot.telegram.setWebhook(`${URL}/bot`);
-    // CRITICAL: Listen on 0.0.0.0
-    app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server on port ${PORT}`));
+    // Listen on 0.0.0.0 to fix Render Access Denied
+    app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`));
 } else {
     bot.launch();
 }
-
-// Graceful Stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
