@@ -1,7 +1,7 @@
 {
-  "name": "telegram-media-bot",
-  "version": "2.0.0",
-  "description": "Reddit API Downloader",
+  "name": "reddit-mirror-bot",
+  "version": "3.0.0",
+  "description": "Bypass Reddit Blocks via Mirrors",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -10,7 +10,8 @@
     "telegraf": "^4.16.3",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "axios": "^1.6.8"
+    "axios": "^1.6.8",
+    "user-agent": "^1.0.4"
   },
   "engines": {
     "node": ">=18.0.0"
