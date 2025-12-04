@@ -20,7 +20,6 @@ const URL = process.env.RENDER_EXTERNAL_URL; // Render sets this automatically
 const PORT = process.env.PORT || 3000;
 
 // List of public Cobalt instances (Fallbacks to ensure 100% uptime)
-// You can add more from: https://instances.cobalt.tools/
 const COBALT_INSTANCES = [
     'https://api.cobalt.tools/api/json',
     'https://cobalt.kwiatekmiki.pl/api/json',
@@ -52,7 +51,6 @@ async function fetchMedia(targetUrl, isAudioOnly = false) {
                 vQuality: '720',
                 aFormat: 'mp3',
                 isAudioOnly: isAudioOnly,
-                // Cobalt settings for better compatibility
                 dubLang: false,
                 disableMetadata: true 
             }, {
@@ -60,7 +58,7 @@ async function fetchMedia(targetUrl, isAudioOnly = false) {
                     'Accept': 'application/json',
                     'Content-Type': 'application/json'
                 },
-                timeout: 15000 // 15 second timeout per instance
+                timeout: 15000 
             });
 
             if (response.data && (response.data.url || response.data.picker)) {
@@ -90,23 +88,19 @@ bot.start((ctx) => {
     );
 });
 
-// Handle any text message that contains a link
 bot.on('text', async (ctx) => {
     const text = ctx.message.text;
     const urlRegex = /(https?:\/\/[^\s]+)/g;
     const urls = text.match(urlRegex);
 
-    if (!urls) return; // Ignore messages without links
+    if (!urls) return; 
 
     const targetUrl = urls[0];
-
-    // Status message
     const statusMsg = await ctx.reply('🔍 *Processing link...* \n_Please wait, contacting servers._', { parse_mode: 'Markdown' });
 
     try {
         const data = await fetchMedia(targetUrl);
 
-        // 1. Handle "Picker" (Multiple items, e.g., Insta Carousel)
         if (data.status === 'picker' && data.picker) {
             await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, '📦 *Album detected!* Sending files...', { parse_mode: 'Markdown' });
             
@@ -120,36 +114,19 @@ bot.on('text', async (ctx) => {
             return;
         }
 
-        // 2. Handle Single File
         if (data.status === 'stream' || data.status === 'redirect' || data.url) {
             const mediaUrl = data.url;
-            
             await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, '⬇️ *Downloading...*', { parse_mode: 'Markdown' });
 
-            // Determine type based on URL extension or assume video usually
-            // A simplified check. Cobalt usually returns specific types but we send generic requests.
-            // We try to send as video first, catch error, then document.
-            
             try {
-                // Try sending as Video
-                await ctx.replyWithVideo(mediaUrl, { 
-                    caption: '✨ Downloaded via @' + ctx.botInfo.username 
-                });
+                await ctx.replyWithVideo(mediaUrl, { caption: '✨ Downloaded via @' + ctx.botInfo.username });
             } catch (videoError) {
                 try {
-                    // If video fails (maybe it's an image or gif), try Photo
-                    await ctx.replyWithPhoto(mediaUrl, { 
-                        caption: '✨ Downloaded via @' + ctx.botInfo.username 
-                    });
+                    await ctx.replyWithPhoto(mediaUrl, { caption: '✨ Downloaded via @' + ctx.botInfo.username });
                 } catch (photoError) {
-                    // If photo fails, send as Document (fallback for audio or unknown)
-                    await ctx.replyWithDocument(mediaUrl, { 
-                        caption: '✨ Downloaded via @' + ctx.botInfo.username 
-                    });
+                    await ctx.replyWithDocument(mediaUrl, { caption: '✨ Downloaded via @' + ctx.botInfo.username });
                 }
             }
-
-            // Delete status message
             await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id);
         } else {
             throw new Error('Unknown API response format');
@@ -157,8 +134,6 @@ bot.on('text', async (ctx) => {
 
     } catch (err) {
         console.error('Download Error:', err);
-        
-        // Robust Error Handling
         let errorText = '❌ *Download Failed.*\n\n';
         if (err.response && err.response.status === 404) {
             errorText += 'The content was not found or is private.';
@@ -168,36 +143,46 @@ bot.on('text', async (ctx) => {
             errorText += 'Make sure the link is valid and public.';
         }
         
-        // If file is too large for Telegram Bot API (50MB limit for URL upload)
-        // We provide the direct link instead.
         if (err.description && err.description.includes('file is too big')) {
              errorText = '⚠️ *File is too large for Telegram.*\n\n' + 
                          'Use this direct link to download:\n' + 
-                         `[Click Here to Download](${targetUrl})`; // We can't get the direct link if it failed inside replyWith, so we just inform.
+                         `[Click Here to Download](${targetUrl})`; 
         }
 
         await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, errorText, { parse_mode: 'Markdown' });
     }
 });
 
-// --- SERVER SETUP (Webhooks + Keep-Alive) ---
+// --- SERVER SETUP (FIXED) ---
 
-// 1. Telegram Webhook Route
-app.use(await bot.createWebhook({ domain: URL }));
+async function startServer() {
+    // 1. Telegram Webhook Route
+    // This awaits inside an async function, which fixes the error
+    if (URL) {
+        app.use(await bot.createWebhook({ domain: URL }));
+        console.log(`Webhook set to: ${URL}`);
+    } else {
+        console.log('Running in local mode (no webhook url found)');
+    }
 
-// 2. Keep-Alive Route (For pinging)
-app.get('/', (req, res) => {
-    res.send('Bot is running! 🚀');
+    // 2. Keep-Alive Route (For pinging)
+    app.get('/', (req, res) => {
+        res.send('Bot is running! 🚀');
+    });
+
+    // 3. Health Check
+    app.get('/health', (req, res) => {
+        res.status(200).json({ status: 'ok' });
+    });
+
+    app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+}
+
+// Start the server
+startServer().catch(err => {
+    console.error('Failed to start server:', err);
 });
-
-// 3. Health Check
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
-});
-
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 // Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
