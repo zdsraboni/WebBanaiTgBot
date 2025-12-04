@@ -58,18 +58,32 @@ const server = http.createServer(async (req, res) => {
                             const tmpFile = path.join("/tmp", `media_${Date.now()}.mp4`);
 
                             try {
-                                // Download using yt-dlp-exec
+                                // Download using yt-dlp-exec with enhanced options
                                 await ytDlp(url, {
                                     output: tmpFile,
                                     ffmpegLocation: ffmpegPath,
+                                    // Use browser-like headers to bypass blocks
+                                    "add-header": [
+                                        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+                                        "Accept-Language: en-US,en;q=0.9"
+                                    ],
+                                    // Allow NSFW / age-restricted content
+                                    ignoreErrors: true,
+                                    noCheckCertificates: true,
+                                    allow_unplayable_formats: true,
+                                    extractFlat: false,
+                                    preferFreeFormats: true,
                                 });
 
-                                // Send file
-                                await sendDocument(chatId, tmpFile);
-                                await sendMessage(chatId, "✅ Download complete and sent to you!");
+                                // Check if file was created
+                                if (fs.existsSync(tmpFile) && fs.statSync(tmpFile).size > 0) {
+                                    await sendDocument(chatId, tmpFile);
+                                    await sendMessage(chatId, "✅ Download complete and sent to you!");
+                                    fs.unlink(tmpFile, () => {});
+                                } else {
+                                    await sendMessage(chatId, "❌ Unable to download media. It may be restricted or unsupported.");
+                                }
 
-                                // Delete temporary file
-                                fs.unlink(tmpFile, () => {});
                             } catch (err) {
                                 console.error("Download/send error:", err);
                                 await sendMessage(chatId, `❌ Error downloading or sending media:\n${err.message}`);
