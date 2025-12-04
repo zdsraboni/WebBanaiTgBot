@@ -11,8 +11,7 @@ const execPromise = util.promisify(exec);
 
 // --- CONFIGURATION ---
 const BOT_TOKEN = process.env.BOT_TOKEN;
-// FIX: Renamed variable to avoid breaking the code
-const SERVER_URL = process.env.RENDER_EXTERNAL_URL; 
+const APP_URL = process.env.RENDER_EXTERNAL_URL;
 const PORT = process.env.PORT || 3000;
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -21,11 +20,19 @@ const app = express();
 const downloadDir = path.join(__dirname, 'downloads');
 if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir);
 
-// List of Public Mirrors (These bypass the Reddit 403 Block)
+// --- 1. SETUP COOKIES ---
+const cookiePath = path.join(__dirname, 'cookies.txt');
+if (process.env.REDDIT_COOKIES) {
+    // We treat the input as raw Netscape text. 
+    // Render environment variables preserve newlines, which is perfect.
+    fs.writeFileSync(cookiePath, process.env.REDDIT_COOKIES);
+    console.log("✅ Cookies loaded!");
+}
+
+// --- 2. SETUP MIRRORS (Backup Plan) ---
 const MIRRORS = [
     'https://redlib.catsarch.com',
     'https://redlib.vlingit.com',
-    'https://redlib.tux.pizza',
     'https://libreddit.kavin.rocks'
 ];
 
@@ -33,76 +40,51 @@ const URL_REGEX = /(https?:\/\/(?:www\.|old\.|mobile\.)?(?:reddit\.com|x\.com|tw
 
 // --- UTILITIES ---
 
-// 1. Resolve /s/ Short Links
-const resolveRedirect = async (shortUrl) => {
-    if (!shortUrl.includes('/s/')) return shortUrl;
-    try {
-        const res = await axios.head(shortUrl, {
-            maxRedirects: 0,
-            validateStatus: (s) => s >= 300 && s < 400,
-            headers: { 'User-Agent': 'Mozilla/5.0 (Android 10; Mobile)' }
-        });
-        return res.headers.location || shortUrl;
-    } catch (e) {
-        return shortUrl;
-    }
+const runYtDlp = async (url) => {
+    let cmd = `yt-dlp --force-ipv4 --no-warnings --no-playlist -J "${url}"`;
+    // If we have cookies, use them
+    if (fs.existsSync(cookiePath)) cmd += ` --cookies "${cookiePath}"`;
+    return await execPromise(cmd);
 };
 
-// 2. Mirror Strategy: Get the direct video link (v.redd.it) without touching reddit.com
-const getMediaFromMirror = async (originalUrl) => {
+const getMirrorLink = async (originalUrl) => {
     try {
-        // Parse the URL safely
-        const parsed = new URL(originalUrl); 
-        const path = parsed.pathname; // e.g. /r/funny/comments/...
-
-        // Try mirrors one by one
+        const parsed = new URL(originalUrl);
+        const path = parsed.pathname;
         for (const domain of MIRRORS) {
             try {
-                // We request the JSON data from the mirror
-                const mirrorApi = `${domain}${path}.json`;
-                console.log(`🛡️ Checking Mirror: ${mirrorApi}`);
-
-                const { data } = await axios.get(mirrorApi, {
-                    timeout: 6000,
-                    headers: { 'User-Agent': 'GoogleBot' }
-                });
-
+                // Try to get JSON from mirror
+                const { data } = await axios.get(`${domain}${path}.json`, { timeout: 5000 });
                 const post = data[0].data.children[0].data;
-
-                // Check for Video
-                if (post.is_video && post.media && post.media.reddit_video) {
-                    return {
-                        title: post.title,
-                        // Clean the URL to ensure it's the direct file
+                if (post.is_video && post.media?.reddit_video) {
+                    return { 
+                        title: post.title, 
                         url: post.media.reddit_video.fallback_url.split('?')[0],
-                        is_video: true
+                        is_video: true 
                     };
                 }
-                // Check for Image/GIF
-                if (post.url && (post.url.includes('i.redd.it') || post.url.includes('v.redd.it'))) {
-                    return { title: post.title, url: post.url, is_video: true };
-                }
-
-            } catch (innerErr) {
-                console.log(`⚠️ Mirror ${domain} failed, trying next...`);
-            }
+            } catch (e) { continue; }
         }
-    } catch (e) {
-        console.error("Critical Mirror Error:", e.message);
-    }
+    } catch (e) { return null; }
     return null;
 };
 
-// 3. Downloader
-const runYtDlp = async (url) => {
-    // Standard download command
-    const cmd = `yt-dlp --force-ipv4 --no-warnings --no-playlist -J "${url}"`;
+const downloadMedia = async (url, isAudio, formatId, outputPath) => {
+    let cmd = `yt-dlp --force-ipv4 --no-warnings`;
+    if (fs.existsSync(cookiePath)) cmd += ` --cookies "${cookiePath}"`;
+
+    if (isAudio) {
+        cmd += ` -x --audio-format mp3 -o "${outputPath}.%(ext)s" "${url}"`;
+    } else {
+        const fmt = formatId === 'best' ? 'best' : `${formatId}+bestaudio/best`;
+        cmd += ` -f "${fmt}" --merge-output-format mp4 -o "${outputPath}.%(ext)s" "${url}"`;
+    }
     return await execPromise(cmd);
 };
 
 // --- HANDLERS ---
 
-bot.start((ctx) => ctx.reply("👋 Ready! Send me a link."));
+bot.start((ctx) => ctx.reply("👋 Ready! I have your cookies loaded."));
 
 bot.on('text', async (ctx) => {
     const match = ctx.message.text.match(URL_REGEX);
@@ -111,32 +93,32 @@ bot.on('text', async (ctx) => {
     const msg = await ctx.reply("🔍 *Processing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
-        // Step 1: Expand Short Link
-        let targetUrl = await resolveRedirect(match[0]);
-        let downloadUrl = targetUrl; // Default
+        const url = match[0];
         let info = {};
+        let downloadUrl = url;
 
-        // Step 2: Decide Strategy
-        if (targetUrl.includes('reddit.com')) {
-            console.log("🕵️ Activating Mirror Bypass for Reddit...");
-            const mirrorData = await getMediaFromMirror(targetUrl);
-            
-            if (mirrorData) {
-                console.log("✅ Mirror Success:", mirrorData.url);
-                downloadUrl = mirrorData.url;
-                info = { title: mirrorData.title, formats: [], extractor_key: 'Mirror' };
-            } else {
-                // If mirrors fail, try direct (might fail, but worth a shot)
-                const { stdout } = await runYtDlp(targetUrl);
-                info = JSON.parse(stdout);
-            }
-        } else {
-            // Twitter/X usually works direct
-            const { stdout } = await runYtDlp(targetUrl);
+        // STRATEGY 1: Try Main Site with Cookies
+        try {
+            const { stdout } = await runYtDlp(url);
             info = JSON.parse(stdout);
+            console.log("✅ Fetched via Cookies");
+        } catch (err) {
+            // STRATEGY 2: If Cookies fail (403), use Mirror
+            if (url.includes('reddit.com')) {
+                console.log("⚠️ Cookies failed/blocked. Switching to Mirror...");
+                const mirrorData = await getMirrorLink(url);
+                if (mirrorData) {
+                    info = { title: mirrorData.title, formats: [], extractor_key: 'Mirror' };
+                    downloadUrl = mirrorData.url; // Use direct v.redd.it link
+                } else {
+                    throw err; // Mirror failed too
+                }
+            } else {
+                throw err;
+            }
         }
 
-        // Step 3: Buttons
+        // Buttons
         const buttons = [];
         if (info.formats && info.formats.length > 0) {
             const formats = info.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height);
@@ -147,29 +129,25 @@ bot.on('text', async (ctx) => {
                     buttons.push([Markup.button.callback(`📹 ${f.height}p`, `v|${f.format_id}|${f.height}`)]);
                 }
             });
-        } else {
-            // Fallback button for Mirror results
-            buttons.push([Markup.button.callback("📹 Download Video", `v|best|best`)]);
         }
+        if (buttons.length === 0) buttons.push([Markup.button.callback("📹 Download Video", `v|best|best`)]);
         buttons.push([Markup.button.callback("🎵 Audio Only", "a|best|audio")]);
 
-        // Hide safe URL in message
         await ctx.telegram.editMessageText(
             ctx.chat.id, msg.message_id, null,
-            `✅ *${(info.title || 'Media Found').substring(0, 50)}...*\nSource: [Link](${downloadUrl})`,
+            `✅ *${(info.title || 'Media').substring(0, 50)}...*\nSource: [Link](${downloadUrl})`,
             { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
         );
 
     } catch (err) {
-        console.error("Main Error:", err);
-        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed. Mirrors are busy or link is invalid.");
+        console.error("Handler Error:", err.message);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed. Login expired or link is private.");
     }
 });
 
 bot.on('callback_query', async (ctx) => {
     const [type, id, label] = ctx.callbackQuery.data.split('|');
     const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
-    
     if (!url) return ctx.answerCbQuery("❌ Link expired.");
 
     await ctx.answerCbQuery("🚀 Downloading...");
@@ -180,19 +158,11 @@ bot.on('callback_query', async (ctx) => {
     const finalFile = `${basePath}.${type === 'a' ? 'mp3' : 'mp4'}`;
 
     try {
-        let cmd;
-        if (type === 'a') {
-            cmd = `yt-dlp --force-ipv4 --no-warnings -x --audio-format mp3 -o "${basePath}.%(ext)s" "${url}"`;
-        } else {
-            const fmt = id === 'best' ? 'best' : `${id}+bestaudio/best`;
-            cmd = `yt-dlp --force-ipv4 --no-warnings -f "${fmt}" --merge-output-format mp4 -o "${basePath}.%(ext)s" "${url}"`;
-        }
-
-        await execPromise(cmd);
-
+        await downloadMedia(url, type === 'a', id, basePath);
+        
         const stats = fs.statSync(finalFile);
         if (stats.size > 49.5 * 1024 * 1024) {
-            await ctx.editMessageText("⚠️ File > 50MB. Telegram limit.");
+            await ctx.editMessageText("⚠️ File > 50MB.");
         } else {
             await ctx.editMessageText("📤 *Uploading...*", { parse_mode: 'Markdown' });
             type === 'a' 
@@ -202,19 +172,17 @@ bot.on('callback_query', async (ctx) => {
         }
     } catch (e) {
         console.error("DL Error:", e);
-        await ctx.editMessageText("❌ Download Failed.");
+        await ctx.editMessageText("❌ Download Error.");
     } finally {
         if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
     }
 });
 
-// --- SERVER SETUP ---
-app.get('/', (req, res) => res.send('✅ Bot is Alive!'));
-
+app.get('/', (req, res) => res.send('✅ Bot Online'));
 if (process.env.NODE_ENV === 'production') {
     app.use(bot.webhookCallback('/bot'));
-    bot.telegram.setWebhook(`${SERVER_URL}/bot`);
-    app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server on port ${PORT}`));
+    bot.telegram.setWebhook(`${APP_URL}/bot`);
+    app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server on ${PORT}`));
 } else {
     bot.launch();
 }
