@@ -1,10 +1,10 @@
-import http from "http";
-import fetch from "node-fetch";
-import fs from "fs";
-import path from "path";
-import ytDlp from "yt-dlp-exec";
-import ffmpegPath from "ffmpeg-static";
-import FormData from "form-data";
+const http = require("http");
+const fetch = require("node-fetch");
+const fs = require("fs");
+const path = require("path");
+const ytDlp = require("yt-dlp-exec");
+const ffmpegPath = require("ffmpeg-static");
+const FormData = require("form-data");
 
 const TOKEN = process.env.BOT_TOKEN;
 const API = `https://api.telegram.org/bot${TOKEN}`;
