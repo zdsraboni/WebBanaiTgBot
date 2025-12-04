@@ -11,23 +11,32 @@ const API = `https://api.telegram.org/bot${TOKEN}`;
 
 // Send text message
 async function sendMessage(chatId, text) {
-    await fetch(`${API}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text })
-    });
+    try {
+        await fetch(`${API}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: chatId, text })
+        });
+    } catch (e) {
+        console.error("Error sending message:", e);
+    }
 }
 
 // Send file to Telegram
 async function sendDocument(chatId, filePath) {
-    const form = new FormData();
-    form.append("chat_id", chatId);
-    form.append("document", fs.createReadStream(filePath));
+    try {
+        const form = new FormData();
+        form.append("chat_id", chatId);
+        form.append("document", fs.createReadStream(filePath));
 
-    await fetch(`${API}/sendDocument`, {
-        method: "POST",
-        body: form
-    });
+        await fetch(`${API}/sendDocument`, {
+            method: "POST",
+            body: form
+        });
+    } catch (e) {
+        console.error("Error sending document:", e);
+        throw e; // Re-throw to handle in the main loop
+    }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -55,35 +64,45 @@ const server = http.createServer(async (req, res) => {
                         } else {
                             await sendMessage(chatId, "⏳ Processing your download, please wait...");
 
+                            // Use a more specific extension or allow yt-dlp to determine it, 
+                            // but for telegram sending, keeping .mp4 is usually safe.
                             const tmpFile = path.join("/tmp", `media_${Date.now()}.mp4`);
 
                             try {
-                                // Download using yt-dlp-exec with proper camelCase options
+                                console.log(`Attempting to download: ${url}`);
+                                
+                                // Download using yt-dlp-exec
                                 await ytDlp(url, {
                                     output: tmpFile,
                                     ffmpegLocation: ffmpegPath,
-                                    addHeader: [  // browser-like headers
+                                    addHeader: [
                                         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
                                         "Accept-Language: en-US,en;q=0.9"
                                     ],
-                                    ignoreErrors: true,        // Continue on minor extraction errors
-                                    noCheckCertificates: true, // Ignore SSL certificate issues
-                                    extractFlat: false,        // Flatten playlists? false = download media normally
-                                    preferFreeFormats: true    // Prefer free codecs
+                                    ignoreErrors: true,        
+                                    noCheckCertificates: true, 
+                                    preferFreeFormats: true,
+                                    // FIXED: Removed 'extractFlat: false' to prevent the invalid flag error.
+                                    // FIXED: Added 'format' to ensure compatibility
+                                    format: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
                                 });
 
                                 // Check if file exists
                                 if (fs.existsSync(tmpFile) && fs.statSync(tmpFile).size > 0) {
                                     await sendDocument(chatId, tmpFile);
                                     await sendMessage(chatId, "✅ Download complete and sent to you!");
-                                    fs.unlink(tmpFile, () => {});
+                                    
+                                    // Clean up
+                                    fs.unlink(tmpFile, (err) => {
+                                        if (err) console.error("Error deleting temp file:", err);
+                                    });
                                 } else {
-                                    await sendMessage(chatId, "❌ Unable to download media. It may be restricted, private, or unsupported.");
+                                    await sendMessage(chatId, "❌ Download failed: File was not created. The URL might be restricted or require cookies.");
                                 }
 
                             } catch (err) {
-                                console.error("Download/send error:", err);
-                                await sendMessage(chatId, `❌ Error downloading or sending media:\n${err.message}`);
+                                console.error("Download/send error details:", err);
+                                await sendMessage(chatId, `❌ Error: ${err.message}`);
                             }
                         }
                     } else {
