@@ -4,95 +4,98 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const util = require('util');
-const https = require('https');
 
 const execPromise = util.promisify(exec);
 
 // --- CONFIGURATION ---
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const URL = process.env.RENDER_EXTERNAL_URL; 
+const URL = process.env.RENDER_EXTERNAL_URL;
 const PORT = process.env.PORT || 3000;
-
-if (!BOT_TOKEN) {
-    console.error("❌ BOT_TOKEN is missing!");
-    process.exit(1);
-}
 
 const bot = new Telegraf(BOT_TOKEN);
 const downloadDir = path.join(__dirname, 'downloads');
 if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir);
 
+// Matches Reddit and Twitter/X links
 const URL_REGEX = /(https?:\/\/(?:www\.|old\.|mobile\.)?(?:reddit\.com|x\.com|twitter\.com)\/[^\s]+)/i;
 
-// --- UTILITIES ---
+// --- CRITICAL FIX: REDIRECT RESOLVER ---
+// This function turns the blocked "/s/" links into real links using fake headers
+const resolveRedditLink = async (url) => {
+    if (!url.includes('/s/')) return url; // If it's already a full link, skip
+    
+    try {
+        console.log("🔄 Resolving short link:", url);
+        // We use Node's native fetch with a fake User-Agent to trick Reddit
+        const response = await fetch(url, {
+            method: 'HEAD',
+            redirect: 'manual', // Stop auto-redirect so we can grab the location
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5'
+            }
+        });
+
+        if (response.status >= 300 && response.status < 400) {
+            const location = response.headers.get('location');
+            if (location) {
+                console.log("✅ Resolved to:", location);
+                return location; // Return the real, long URL
+            }
+        }
+        return url; // Fallback
+    } catch (error) {
+        console.error("Link resolution failed:", error);
+        return url;
+    }
+};
 
 const formatBytes = (bytes, decimals = 2) => {
     if (!+bytes) return 'Unknown';
     const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const sizes = ['MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i]}`;
-};
-
-// HELPER: Resolve Reddit short links (fix for 403 errors)
-const resolveRedirect = async (shortUrl) => {
-    if (!shortUrl.includes('reddit.com') && !shortUrl.includes('/s/')) return shortUrl;
-    
-    return new Promise((resolve) => {
-        https.get(shortUrl, (res) => {
-            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                // If it's a redirect, return the new long URL
-                resolve(res.headers.location);
-            } else {
-                // If no redirect, return original
-                resolve(shortUrl);
-            }
-        }).on('error', () => resolve(shortUrl)); // Fallback to original on error
-    });
+    // We only care about MB/GB usually
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i] || 'Bytes'}`;
 };
 
 const runYtDlp = async (args) => {
-    // 1. Force IPv4 (often bypasses blocks)
-    // 2. Add fake headers to look like a real PC
-    // 3. Add Referer
-    const headers = [
-        '--add-header "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"',
-        '--add-header "Referer:https://www.google.com/"',
-        '--add-header "Accept-Language:en-US,en;q=0.9"'
-    ].join(' ');
-
-    const cmd = `yt-dlp --force-ipv4 --no-warnings --no-playlist ${headers} ${args}`;
+    // Heavy stealth flags to look like a Windows PC
+    const cmd = `yt-dlp --force-ipv4 --no-warnings --no-playlist --add-header "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --add-header "Referer:https://www.google.com/" ${args}`;
     const { stdout } = await execPromise(cmd);
     return stdout;
 };
 
-// --- HANDLERS ---
+// --- BOT LOGIC ---
 
-bot.start((ctx) => ctx.reply("👋 Media Bot Ready! Send a Reddit or Twitter link."));
+bot.start((ctx) => ctx.reply("👋 I am ready! Send me a Reddit or Twitter link."));
 
 bot.on('text', async (ctx) => {
     const text = ctx.message.text;
     const match = text.match(URL_REGEX);
-    if (!match) return; 
+    if (!match) return;
 
     const msg = await ctx.reply("🔍 *Processing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
         let url = match[0];
 
-        // FIX: Resolve Reddit short links to full links
+        // 1. Resolve Reddit Short Links
         if (url.includes('reddit.com') && url.includes('/s/')) {
-            await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "🔗 *Resolving link...*", { parse_mode: 'Markdown' });
-            url = await resolveRedirect(url);
+            await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "🔗 *Resolving Redirect...*", { parse_mode: 'Markdown' });
+            url = await resolveRedditLink(url);
         }
 
-        // Fetch JSON
+        // 2. Get Info
+        // We use -J to get JSON metadata
         const jsonOutput = await runYtDlp(`-J "${url}"`);
         const info = JSON.parse(jsonOutput);
 
+        // 3. Process Qualities
         const formats = (info.formats || []).filter(f => f.ext === 'mp4' && f.height);
         
-        // Logic to deduplicate qualities
+        // Remove duplicates
         const uniqueQualities = [];
         const seenHeights = new Set();
         formats.sort((a, b) => b.height - a.height);
@@ -110,49 +113,69 @@ bot.on('text', async (ctx) => {
 
         const buttons = [];
         uniqueQualities.slice(0, 5).forEach(q => {
-            const size = formatBytes(q.filesize);
-            buttons.push([Markup.button.callback(`📹 ${q.height}p (${size})`, `v|${q.id}|${q.height}`)]);
+            // Using a shorter ID format to avoid Telegram 64-byte limit error
+            // Data format: v|height|format_id
+            buttons.push([Markup.button.callback(`📹 ${q.height}p`, `v|${q.height}|${q.id}`)]);
         });
-        buttons.push([Markup.button.callback("🎵 Audio (MP3)", "a|mp3")]);
+        buttons.push([Markup.button.callback("🎵 Audio Only", "a|mp3|mp3")]);
 
-        // We store the CLEAN resolved URL in the text body (hidden char) or rely on reply
-        // Hack: Append the URL at the bottom of the message text invisibly or visibly so we can grab it later
+        // IMPORTANT: We attach the resolved URL to the message text so we can find it later
+        // We hide it in a "text link" with a zero-width space or just append it visibly
         await ctx.telegram.editMessageText(
             ctx.chat.id,
             msg.message_id,
             null,
-            `✅ Found: *${info.title.substring(0, 40)}...*\nChoose quality:\n\nUrlSource: ${url}`, 
-            { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
+            `✅ *${info.title.substring(0, 50)}...*\n\nSource: [Link](${url})\nChoose quality:`,
+            { 
+                parse_mode: 'Markdown', 
+                ...Markup.inlineKeyboard(buttons) 
+            }
         );
 
     } catch (err) {
         console.error(err);
-        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed. Reddit might be blocking the server, or the link is private.");
+        // If it fails, we try to guess it's a 403 or 404
+        let errorMsg = "❌ Failed. The link might be private or blocked.";
+        if (err.message && err.message.includes('403')) {
+            errorMsg = "❌ Reddit blocked the request. Try sending the full link (not the /s/ one) if possible.";
+        }
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, errorMsg);
     }
 });
 
 bot.on('callback_query', async (ctx) => {
-    const [type, id, quality] = ctx.callbackQuery.data.split('|');
-    
-    // Retrieve URL from the message text we sent earlier
-    // We look for "UrlSource: http..."
-    const messageText = ctx.callbackQuery.message.text;
-    const urlMatch = messageText.match(/UrlSource: (https?:\/\/[^\s]+)/);
-    
-    let url = "";
-    if (urlMatch) {
-        url = urlMatch[1];
-    } else {
-        // Fallback to original reply method if parsing fails
-        const replyText = ctx.callbackQuery.message.reply_to_message?.text;
-        const replyMatch = replyText?.match(URL_REGEX);
-        if (replyMatch) url = replyMatch[0];
+    // Data format: type|height|id
+    const dataParts = ctx.callbackQuery.data.split('|');
+    const type = dataParts[0];
+    const label = dataParts[1]; // Height or 'mp3'
+    const formatId = dataParts[2];
+
+    // Recover URL from the message entities
+    const entities = ctx.callbackQuery.message.entities || [];
+    const linkEntity = entities.find(e => e.type === 'text_link');
+    const url = linkEntity ? linkEntity.url : null;
+
+    if (!url) {
+        // Fallback: Try to get it from the original message reply
+        const original = ctx.callbackQuery.message.reply_to_message;
+        if (original && original.text) {
+             const match = original.text.match(URL_REGEX);
+             if (match) {
+                 // Note: If we fall back to original text, it might be the short link again
+                 // Ideally we want the resolved one from the entity, but this is a safety net.
+                 await ctx.answerCbQuery("⚠️ Using original link...");
+                 return handleDownload(ctx, match[0], type, label, formatId);
+             }
+        }
+        return ctx.answerCbQuery("❌ Link expired. Please resend.");
     }
 
-    if (!url) return ctx.answerCbQuery("❌ Link lost. Resend.");
+    await handleDownload(ctx, url, type, label, formatId);
+});
 
-    await ctx.answerCbQuery("🚀 Downloading...");
-    await ctx.editMessageText(`⏳ *Downloading ${quality}...*`, { parse_mode: 'Markdown' });
+async function handleDownload(ctx, url, type, label, formatId) {
+    await ctx.answerCbQuery("🚀 Starting...");
+    await ctx.editMessageText(`⏳ *Downloading ${label}...*`, { parse_mode: 'Markdown' });
 
     const timestamp = Date.now();
     const basePath = path.join(downloadDir, `${timestamp}`);
@@ -164,31 +187,34 @@ bot.on('callback_query', async (ctx) => {
             await runYtDlp(`-x --audio-format mp3 -o "${basePath}.%(ext)s" "${url}"`);
         } else {
             finalFile = `${basePath}.mp4`;
-            await runYtDlp(`-f ${id}+bestaudio/best -S vcodec:h264 --merge-output-format mp4 -o "${basePath}.%(ext)s" "${url}"`);
+            // Download specific video + best audio and merge
+            await runYtDlp(`-f ${formatId}+bestaudio/best -S vcodec:h264 --merge-output-format mp4 -o "${basePath}.%(ext)s" "${url}"`);
         }
 
         const stats = fs.statSync(finalFile);
-        if (stats.size > 49 * 1024 * 1024) {
-            await ctx.editMessageText("⚠️ File > 50MB. Cannot upload.");
+        const sizeMB = stats.size / (1024 * 1024);
+
+        if (sizeMB > 49.5) {
+            await ctx.editMessageText(`⚠️ File is ${sizeMB.toFixed(1)}MB. Telegram limits bots to 50MB.`);
         } else {
             await ctx.editMessageText("📤 *Uploading...*", { parse_mode: 'Markdown' });
             if (type === 'a') {
-                await ctx.replyWithAudio({ source: finalFile }, { caption: '🎵 Audio' });
+                await ctx.replyWithAudio({ source: finalFile }, { caption: '🎵 Audio Extracted' });
             } else {
-                await ctx.replyWithVideo({ source: finalFile }, { caption: `🎥 ${quality}p` });
+                await ctx.replyWithVideo({ source: finalFile }, { caption: `🎥 ${label}p Video` });
             }
             await ctx.deleteMessage(); 
         }
     } catch (e) {
-        console.error(e);
-        await ctx.editMessageText("❌ Download failed.");
+        console.error("Download Error:", e);
+        await ctx.editMessageText("❌ Download failed. The server was blocked.");
     } finally {
         if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
     }
-});
+}
 
 if (process.env.NODE_ENV === 'production') {
-    bot.launch({ webhook: { domain: URL, port: PORT } }).then(() => console.log(`🚀 Webhook: ${URL}`));
+    bot.launch({ webhook: { domain: URL, port: PORT } }).then(() => console.log(`🚀 Webhook active: ${URL}`));
 } else {
     bot.launch();
 }
