@@ -58,19 +58,18 @@ const server = http.createServer(async (req, res) => {
                             const tmpFile = path.join("/tmp", `media_${Date.now()}.mp4`);
 
                             try {
-                                // Download using yt-dlp-exec with corrected options
+                                // Download using yt-dlp-exec with proper camelCase options
                                 await ytDlp(url, {
                                     output: tmpFile,
                                     ffmpegLocation: ffmpegPath,
-                                    // Browser-like headers to avoid blocks
-                                    "add-header": [
+                                    addHeader: [  // browser-like headers
                                         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
                                         "Accept-Language: en-US,en;q=0.9"
                                     ],
                                     ignoreErrors: true,        // Continue on minor extraction errors
                                     noCheckCertificates: true, // Ignore SSL certificate issues
-                                    extractFlat: false,
-                                    preferFreeFormats: true
+                                    extractFlat: false,        // Flatten playlists? false = download media normally
+                                    preferFreeFormats: true    // Prefer free codecs
                                 });
 
                                 // Check if file exists
