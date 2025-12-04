@@ -1,7 +1,7 @@
 {
   "name": "media-bot-final",
-  "version": "4.0.0",
-  "description": "Fixed Reddit Downloader",
+  "version": "5.0.0",
+  "description": "Hybrid Downloader",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
