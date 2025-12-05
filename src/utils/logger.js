@@ -7,13 +7,14 @@ const init = () => {
     const originalLog = console.log;
     const originalError = console.error;
 
-    // Override console.log
+    // Override console.log to save messages
     console.log = (...args) => {
         const message = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
         const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
         
+        // Add to our memory list
         logs.push({ time: timestamp, type: 'INFO', message });
-        if (logs.length > LOG_LIMIT) logs.shift(); // Keep buffer small
+        if (logs.length > LOG_LIMIT) logs.shift(); // Remove old logs
         
         originalLog.apply(console, args); // Print to real terminal too
     };
@@ -29,7 +30,7 @@ const init = () => {
         originalError.apply(console, args);
     };
 
-    console.log("✅ Logger Module Attached");
+    console.log("✅ Live Logger Attached");
 };
 
 const getLogs = () => logs;
