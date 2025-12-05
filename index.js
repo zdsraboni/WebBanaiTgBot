@@ -14,28 +14,40 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const APP_URL = process.env.RENDER_EXTERNAL_URL;
 const PORT = process.env.PORT || 3000;
 
+// MATCHING USER-AGENT (Crucial: Must match your Android Browser)
+const USER_AGENT = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
+
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
 const downloadDir = path.join(__dirname, 'downloads');
 if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir);
 
-// --- 1. COOKIE LOADER ---
+// --- 1. COOKIE LOADER & REPAIR ---
 const cookiePath = path.join(__dirname, 'cookies.txt');
 if (process.env.REDDIT_COOKIES) {
     let rawData = process.env.REDDIT_COOKIES;
-    // Fix: Un-escape newlines that Render might have broken
-    rawData = rawData.replace(/\\n/g, '\n');
-    if (!rawData.startsWith('# Netscape')) rawData = "# Netscape HTTP Cookie File\n" + rawData;
+    
+    // Fix 1: Restore newlines lost by Render
+    rawData = rawData.replace(/\\n/g, '\n').replace(/ /g, '\t'); 
+    
+    // Fix 2: Clean up the #HttpOnly_ prefix which sometimes confuses yt-dlp
+    // We replace "#HttpOnly_" with nothing, effectively uncommenting it for usage
+    rawData = rawData.replace(/#HttpOnly_/g, '');
+
+    // Fix 3: Ensure Header exists
+    if (!rawData.startsWith('# Netscape')) {
+        rawData = "# Netscape HTTP Cookie File\n" + rawData;
+    }
+
     fs.writeFileSync(cookiePath, rawData);
-    console.log("✅ Cookies loaded!");
+    console.log("✅ Cookies loaded & User-Agent sync prepared.");
 }
 
-// --- 2. MIRRORS (The Backup Plan) ---
+// --- 2. MIRRORS (Backup) ---
 const MIRRORS = [
     'https://redlib.catsarch.com',
     'https://redlib.vlingit.com',
-    'https://redlib.tux.pizza',
     'https://libreddit.kavin.rocks'
 ];
 
@@ -43,28 +55,21 @@ const URL_REGEX = /(https?:\/\/(?:www\.|old\.|mobile\.)?(?:reddit\.com|x\.com|tw
 
 // --- UTILITIES ---
 
-// CRITICAL FIX: Expand /s/ links so Mirrors can read them
 const resolveRedirect = async (shortUrl) => {
     if (!shortUrl.includes('/s/')) return shortUrl;
     try {
-        console.log("🔄 Resolving short link...");
         const res = await axios.head(shortUrl, {
             maxRedirects: 0,
             validateStatus: (s) => s >= 300 && s < 400,
-            headers: { 
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
-            }
+            headers: { 'User-Agent': USER_AGENT }
         });
         return res.headers.location || shortUrl;
-    } catch (e) {
-        console.log("⚠️ Resolve failed, using original.");
-        return shortUrl;
-    }
+    } catch (e) { return shortUrl; }
 };
 
 const runYtDlp = async (url) => {
-    const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-    let cmd = `yt-dlp --force-ipv4 --no-warnings --no-playlist --user-agent "${ua}" -J "${url}"`;
+    // We force the Android User-Agent here
+    let cmd = `yt-dlp --force-ipv4 --no-warnings --no-playlist --user-agent "${USER_AGENT}" -J "${url}"`;
     if (fs.existsSync(cookiePath)) cmd += ` --cookies "${cookiePath}"`;
     return await execPromise(cmd);
 };
@@ -72,18 +77,15 @@ const runYtDlp = async (url) => {
 const getMirrorLink = async (fullUrl) => {
     try {
         const parsed = new URL(fullUrl);
-        // Ensure we remove any query params like ?share_id=...
         const cleanPath = parsed.pathname; 
-        
         for (const domain of MIRRORS) {
             try {
-                // Append .json to the CLEAN path
-                const apiUrl = `${domain}${cleanPath}.json`;
-                console.log(`🛡️ Checking Mirror: ${apiUrl}`);
-
-                const { data } = await axios.get(apiUrl, { timeout: 4000 });
+                // Mirrors often fail on NSFW content, but we try anyway
+                const { data } = await axios.get(`${domain}${cleanPath}.json`, { 
+                    timeout: 4000,
+                    headers: { 'User-Agent': USER_AGENT } 
+                });
                 const post = data[0].data.children[0].data;
-                
                 if (post.is_video && post.media?.reddit_video) {
                     return { 
                         title: post.title, 
@@ -93,13 +95,12 @@ const getMirrorLink = async (fullUrl) => {
                 }
             } catch (e) { continue; }
         }
-    } catch (e) { console.error("Mirror Error:", e.message); }
+    } catch (e) { }
     return null;
 };
 
 const downloadMedia = async (url, isAudio, formatId, outputPath) => {
-    const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-    let cmd = `yt-dlp --force-ipv4 --no-warnings --user-agent "${ua}"`;
+    let cmd = `yt-dlp --force-ipv4 --no-warnings --user-agent "${USER_AGENT}"`;
     if (fs.existsSync(cookiePath)) cmd += ` --cookies "${cookiePath}"`;
 
     if (isAudio) {
@@ -113,55 +114,47 @@ const downloadMedia = async (url, isAudio, formatId, outputPath) => {
 
 // --- HANDLERS ---
 
-bot.start((ctx) => ctx.reply("👋 Ready! Send me a link."));
+bot.start((ctx) => ctx.reply("👋 Ready! Android Mode Active."));
 
 bot.on('text', async (ctx) => {
     const match = ctx.message.text.match(URL_REGEX);
     if (!match) return;
 
-    const msg = await ctx.reply("🔍 *Processing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
+    const msg = await ctx.reply("🔍 *Verifying Credentials...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
-        // STEP 1: RESOLVE SHORT LINK (Crucial Fix)
         const originalUrl = match[0];
         let fullUrl = await resolveRedirect(originalUrl);
         
-        // Remove tracking params (?share_id=...)
-        try {
-            const u = new URL(fullUrl);
-            u.search = "";
-            fullUrl = u.toString();
-        } catch(e) {}
-
-        console.log(`🎯 Target: ${fullUrl}`);
+        // Clean tracking params
+        try { const u = new URL(fullUrl); u.search = ""; fullUrl = u.toString(); } catch(e) {}
 
         let info = {};
         let downloadUrl = fullUrl;
 
-        // STEP 2: TRY MAIN SITE (COOKIES)
+        // STRATEGY: Main Site with Android Cookies
         try {
             const { stdout } = await runYtDlp(fullUrl);
             info = JSON.parse(stdout);
-            console.log("✅ Fetched via Main Site");
+            console.log("✅ Fetched via Cookies");
         } catch (err) {
-            console.log("⚠️ Main site failed. Activating Mirror...");
-            
-            // STEP 3: TRY MIRROR (BACKUP)
+            console.log("⚠️ Cookies rejected. Trying Mirror...");
             if (fullUrl.includes('reddit.com')) {
                 const mirrorData = await getMirrorLink(fullUrl);
                 if (mirrorData) {
-                    console.log("✅ Fetched via Mirror!");
                     info = { title: mirrorData.title, formats: [], extractor_key: 'Mirror' };
-                    downloadUrl = mirrorData.url; // Use direct v.redd.it link
+                    downloadUrl = mirrorData.url;
                 } else {
-                    throw err; // Mirror failed too
+                    // One last try: Force v.redd.it detection if possible
+                    if(err.stderr && err.stderr.includes('NSFW')) {
+                        throw new Error("NSFW Content blocked. Verify account settings.");
+                    }
+                    throw err;
                 }
-            } else {
-                throw err;
-            }
+            } else { throw err; }
         }
 
-        // STEP 4: BUTTONS
+        // Buttons
         const buttons = [];
         if (info.formats && info.formats.length > 0) {
             const formats = info.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height);
@@ -183,9 +176,9 @@ bot.on('text', async (ctx) => {
         );
 
     } catch (err) {
-        console.error("Final Error:", err.message);
-        let text = "❌ Failed. Mirrors are busy.";
-        if (err.message.includes('403')) text = "❌ Blocked. Cookies invalid & Mirrors failed.";
+        console.error("Handler Error:", err.message);
+        let text = "❌ Failed.";
+        if (err.message.includes('403')) text = "❌ Access Denied. Reddit rejected the cookies.";
         await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, text);
     }
 });
@@ -223,7 +216,7 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
-app.get('/', (req, res) => res.send('✅ Bot Online'));
+app.get('/', (req, res) => res.send('✅ Bot Online (Android Mode)'));
 if (process.env.NODE_ENV === 'production') {
     app.use(bot.webhookCallback('/bot'));
     bot.telegram.setWebhook(`${APP_URL}/bot`);
