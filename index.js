@@ -4,10 +4,15 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 
-// Import Modules
+// 1. Import Config
 const config = require('./src/config/settings');
+
+// 2. Initialize Logger FIRST
+const logger = require('./src/utils/logger');
+logger.init(); 
+
+// 3. Import Services (THE FIX: Using correct modular files)
 const downloader = require('./src/utils/downloader');
-// FIX: Import the separate services, not the old 'extractors.js'
 const redditService = require('./src/services/reddit');
 const twitterService = require('./src/services/twitter');
 
@@ -32,12 +37,14 @@ const resolveRedirect = async (url) => {
 
 // --- BOT HANDLERS ---
 
-bot.start((ctx) => ctx.reply("👋 Welcome to Media Banai Bot!\nSend a Reddit or Twitter link to start."));
+bot.start((ctx) => ctx.reply("👋 Welcome to Media Banai Bot!\nI am ready with Live Logs."));
 
 bot.on('text', async (ctx) => {
     const match = ctx.message.text.match(config.URL_REGEX);
     if (!match) return;
 
+    // Log the request to show up in your Live Tail
+    console.log(`📩 New Request: ${match[0]}`);
     const msg = await ctx.reply("🔍 *Analyzing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
@@ -45,7 +52,7 @@ bot.on('text', async (ctx) => {
         const fullUrl = await resolveRedirect(inputUrl);
         let media = null;
 
-        // Route to the correct service file
+        // Route to the correct service
         if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
             media = await twitterService.extract(fullUrl);
         } else {
@@ -58,19 +65,15 @@ bot.on('text', async (ctx) => {
         const buttons = [];
         let text = `✅ *${(media.title).substring(0, 50)}...*`;
 
-        // 1. Gallery Button
         if (media.type === 'gallery') {
             text += `\n📚 **Gallery:** ${media.items.length} items`;
             buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
         } 
-        // 2. Image Button
         else if (media.type === 'image') {
             text += `\n🖼 **Image Detected**`;
             buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
         } 
-        // 3. Video Buttons
         else if (media.type === 'video') {
-            // Quality Buttons (Only if formats exist)
             if (media.formats && media.formats.length > 0) {
                 const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height);
                 const seen = new Set();
@@ -81,13 +84,11 @@ bot.on('text', async (ctx) => {
                     }
                 });
             } else {
-                // Fallback Button (Fail-safe / Direct Mode)
                 buttons.push([Markup.button.callback("📹 Download Video", `vid|best`)]);
             }
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
 
-        // Store Source URL hidden in text for Callback to use
         const safeUrl = media.url || media.source; 
         
         await ctx.telegram.editMessageText(
@@ -97,7 +98,7 @@ bot.on('text', async (ctx) => {
         );
 
     } catch (e) {
-        console.error("Processing Error:", e.message);
+        console.error(`Processing Error: ${e.message}`);
         await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed. Content unavailable.");
     }
 });
@@ -109,17 +110,13 @@ bot.on('callback_query', async (ctx) => {
     const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
     if (!url) return ctx.answerCbQuery("❌ Link expired.");
 
-    // Image
     if (action === 'img') {
         await ctx.answerCbQuery("🚀 Sending...");
         try { await ctx.replyWithPhoto(url); } catch { await ctx.replyWithDocument(url); }
         await ctx.deleteMessage();
     }
-    // Album
     else if (action === 'alb') {
         await ctx.answerCbQuery("🚀 Processing...");
-        // Re-extract using original URL logic if needed, but for simplicity
-        // we'll re-run extraction since we can't pass the whole array in callback data.
         let media = null;
         if (url.includes('x.com') || url.includes('twitter')) media = await twitterService.extract(url);
         else media = await redditService.extract(url);
@@ -134,7 +131,6 @@ bot.on('callback_query', async (ctx) => {
             }
         }
     }
-    // Video
     else {
         await ctx.answerCbQuery("🚀 Downloading...");
         await ctx.editMessageText(`⏳ *Downloading...*`, { parse_mode: 'Markdown' });
@@ -144,6 +140,7 @@ bot.on('callback_query', async (ctx) => {
         const finalFile = `${basePath}.${action === 'aud' ? 'mp3' : 'mp4'}`;
 
         try {
+            console.log(`⬇️ Starting Download: ${url}`);
             await downloader.download(url, action === 'aud', id, basePath);
 
             const stats = fs.statSync(finalFile);
@@ -155,9 +152,10 @@ bot.on('callback_query', async (ctx) => {
                     ? await ctx.replyWithAudio({ source: finalFile })
                     : await ctx.replyWithVideo({ source: finalFile });
                 await ctx.deleteMessage();
+                console.log(`✅ Upload Success: ${url}`);
             }
         } catch (e) {
-            console.error("Download Error:", e);
+            console.error(`Download Error: ${e.message}`);
             await ctx.editMessageText("❌ Error during download.");
         } finally {
             if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
@@ -165,12 +163,85 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
-// --- SERVER ---
-app.get('/', (req, res) => res.send('✅ Media Banai Bot Online'));
+// --- LIVE TAIL SERVER ---
+
+// 1. API Endpoint for Logs
+app.get('/api/logs', (req, res) => {
+    res.json(logger.getLogs());
+});
+
+// 2. The "Hacker Terminal" Interface
+app.get('/', (req, res) => {
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Media Banai - Live Console</title>
+        <style>
+            body { background-color: #0d1117; color: #c9d1d9; font-family: 'Consolas', 'Courier New', monospace; padding: 20px; font-size: 13px; margin: 0; }
+            h1 { color: #58a6ff; font-size: 18px; border-bottom: 1px solid #30363d; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+            .status { font-size: 12px; background: #238636; color: white; padding: 2px 8px; border-radius: 12px; }
+            #logs { white-space: pre-wrap; word-wrap: break-word; height: 85vh; overflow-y: auto; padding-bottom: 50px; }
+            .log-entry { margin-bottom: 4px; display: flex; line-height: 1.5; border-bottom: 1px solid #161b22; }
+            .timestamp { color: #8b949e; min-width: 90px; user-select: none; }
+            .type-INFO { color: #3fb950; font-weight: bold; min-width: 50px; }
+            .type-ERROR { color: #f85149; font-weight: bold; min-width: 50px; }
+            .msg { color: #e6edf3; }
+            .autoscroll { position: fixed; bottom: 20px; right: 20px; background: #1f6feb; color: white; border: none; padding: 10px 20px; border-radius: 20px; cursor: pointer; font-weight: bold; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        </style>
+    </head>
+    <body>
+        <h1>
+            <span>🚀 Media Banai Bot</span>
+            <span class="status">● Online</span>
+        </h1>
+        <div id="logs">Connecting to log stream...</div>
+        <button class="autoscroll" onclick="toggleScroll()" id="scrollBtn">Auto-Scroll: ON</button>
+
+        <script>
+            let autoScroll = true;
+            const logContainer = document.getElementById('logs');
+            const btn = document.getElementById('scrollBtn');
+
+            function toggleScroll() {
+                autoScroll = !autoScroll;
+                btn.style.background = autoScroll ? '#1f6feb' : '#30363d';
+                btn.innerText = 'Auto-Scroll: ' + (autoScroll ? 'ON' : 'OFF');
+            }
+
+            async function fetchLogs() {
+                try {
+                    const res = await fetch('/api/logs');
+                    const data = await res.json();
+                    
+                    logContainer.innerHTML = data.map(log => 
+                        \`<div class="log-entry">
+                            <span class="timestamp">[\${log.time}]</span>
+                            <span class="type-\${log.type}">\${log.type}</span>
+                            <span class="msg">\${log.message}</span>
+                        </div>\`
+                    ).join('');
+
+                    if (autoScroll) window.scrollTo(0, document.body.scrollHeight);
+                } catch (e) { console.error("Log fetch failed", e); }
+            }
+
+            // Refresh logs every 2 seconds
+            setInterval(fetchLogs, 2000);
+            fetchLogs();
+        </script>
+    </body>
+    </html>
+    `);
+});
+
+// Launch Server
 if (process.env.NODE_ENV === 'production') {
     app.use(bot.webhookCallback('/bot'));
     bot.telegram.setWebhook(`${config.APP_URL}/bot`);
-    app.listen(config.PORT, '0.0.0.0', () => console.log(`🚀 Server on ${config.PORT}`));
+    app.listen(config.PORT, '0.0.0.0', () => console.log(`🚀 Server listening on port ${config.PORT}`));
 } else {
     bot.launch();
 }
