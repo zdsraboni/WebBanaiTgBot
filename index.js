@@ -2,35 +2,25 @@ const { Telegraf, Markup } = require('telegraf');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
 
 // Import Modules
 const config = require('./src/config/settings');
+const logger = require('./src/utils/logger'); // Import Logger
+const extractor = require('./src/services/extractors');
 const downloader = require('./src/utils/downloader');
-const redditService = require('./src/services/reddit');
-const twitterService = require('./src/services/twitter');
 
+// Initialize Logger FIRST (So we catch boot logs)
+logger.init();
+
+// Init Bot & App
 const bot = new Telegraf(config.BOT_TOKEN);
 const app = express();
 
 if (!fs.existsSync(config.DOWNLOAD_DIR)) fs.mkdirSync(config.DOWNLOAD_DIR, { recursive: true });
 
-// --- UTILITIES ---
-const resolveRedirect = async (url) => {
-    if (!url.includes('/s/')) return url;
-    try {
-        const res = await axios.head(url, {
-            maxRedirects: 0,
-            validateStatus: s => s >= 300 && s < 400,
-            headers: { 'User-Agent': config.UA_ANDROID }
-        });
-        return res.headers.location || url;
-    } catch (e) { return url; }
-};
+// --- BOT LOGIC ---
 
-// --- BOT HANDLERS ---
-
-bot.start((ctx) => ctx.reply("👋 Welcome to Media Banai Bot!\nSend a Reddit or Twitter link to start."));
+bot.start((ctx) => ctx.reply("👋 Media Banai Bot Ready!\nSend Reddit or Twitter links."));
 
 bot.on('text', async (ctx) => {
     const match = ctx.message.text.match(config.URL_REGEX);
@@ -39,36 +29,23 @@ bot.on('text', async (ctx) => {
     const msg = await ctx.reply("🔍 *Analyzing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
-        const inputUrl = match[0];
-        const fullUrl = await resolveRedirect(inputUrl);
-        let media = null;
-
-        // Route to appropriate service
-        if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
-            media = await twitterService.extract(fullUrl);
-        } else {
-            media = await redditService.extract(fullUrl);
-        }
+        console.log(`📩 New Request: ${match[0]}`);
+        const media = await extractor.extract(match[0]);
 
         if (!media) throw new Error("Media not found");
 
-        // --- RENDER INTERFACE ---
         const buttons = [];
         let text = `✅ *${(media.title).substring(0, 50)}...*`;
 
-        // 1. Gallery Button
         if (media.type === 'gallery') {
             text += `\n📚 **Gallery:** ${media.items.length} items`;
             buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
         } 
-        // 2. Image Button
         else if (media.type === 'image') {
-            text += `\n🖼 **Image Detected**`;
+            text += `\n🖼 **Image**`;
             buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
         } 
-        // 3. Video Buttons
         else if (media.type === 'video') {
-            // Quality Buttons (Only if formats exist)
             if (media.formats && media.formats.length > 0) {
                 const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height);
                 const seen = new Set();
@@ -79,13 +56,11 @@ bot.on('text', async (ctx) => {
                     }
                 });
             } else {
-                // Fallback Button (Fail-safe / Direct Mode)
                 buttons.push([Markup.button.callback("📹 Download Video", `vid|best`)]);
             }
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
 
-        // Store Source URL hidden in text for Callback to use
         const safeUrl = media.url || media.source; 
         
         await ctx.telegram.editMessageText(
@@ -95,7 +70,7 @@ bot.on('text', async (ctx) => {
         );
 
     } catch (e) {
-        console.error(e);
+        console.error(`Processing Error: ${e.message}`);
         await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed. Content unavailable.");
     }
 });
@@ -107,21 +82,14 @@ bot.on('callback_query', async (ctx) => {
     const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
     if (!url) return ctx.answerCbQuery("❌ Link expired.");
 
-    // Image
     if (action === 'img') {
         await ctx.answerCbQuery("🚀 Sending...");
         try { await ctx.replyWithPhoto(url); } catch { await ctx.replyWithDocument(url); }
         await ctx.deleteMessage();
     }
-    // Album
     else if (action === 'alb') {
         await ctx.answerCbQuery("🚀 Processing...");
-        // Re-extract using original URL logic if needed, but for simplicity
-        // we'll re-run extraction since we can't pass the whole array in callback data.
-        let media = null;
-        if (url.includes('x.com') || url.includes('twitter')) media = await twitterService.extract(url);
-        else media = await redditService.extract(url);
-
+        const media = await extractor.extract(url);
         if (media?.type === 'gallery') {
             await ctx.deleteMessage();
             for (const item of media.items) {
@@ -132,7 +100,6 @@ bot.on('callback_query', async (ctx) => {
             }
         }
     }
-    // Video
     else {
         await ctx.answerCbQuery("🚀 Downloading...");
         await ctx.editMessageText(`⏳ *Downloading...*`, { parse_mode: 'Markdown' });
@@ -142,20 +109,23 @@ bot.on('callback_query', async (ctx) => {
         const finalFile = `${basePath}.${action === 'aud' ? 'mp3' : 'mp4'}`;
 
         try {
-            await downloader.download(url, action === 'aud', id, basePath);
+            console.log(`⬇️ Starting Download: ${url}`);
+            const isAudio = action === 'aud';
+            await downloader.download(url, isAudio, id, basePath);
 
             const stats = fs.statSync(finalFile);
             if (stats.size > 49.5 * 1024 * 1024) {
                 await ctx.editMessageText("⚠️ File > 50MB (Telegram Limit).");
             } else {
                 await ctx.editMessageText("📤 *Uploading...*", { parse_mode: 'Markdown' });
-                action === 'aud' 
+                isAudio 
                     ? await ctx.replyWithAudio({ source: finalFile })
                     : await ctx.replyWithVideo({ source: finalFile });
                 await ctx.deleteMessage();
+                console.log(`✅ Upload Complete: ${url}`);
             }
         } catch (e) {
-            console.error(e);
+            console.error(`Download Error: ${e.message}`);
             await ctx.editMessageText("❌ Error during download.");
         } finally {
             if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
@@ -163,8 +133,73 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
-// --- SERVER ---
-app.get('/', (req, res) => res.send('✅ Media Banai Bot Online'));
+// --- WEB SERVER (LIVE TAIL UI) ---
+
+// 1. API to fetch logs
+app.get('/api/logs', (req, res) => {
+    res.json(logger.getLogs());
+});
+
+// 2. HTML Dashboard
+app.get('/', (req, res) => {
+    const html = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Media Banai - Live Tail</title>
+        <style>
+            body { background-color: #0d1117; color: #c9d1d9; font-family: 'Consolas', 'Courier New', monospace; padding: 20px; font-size: 14px; }
+            h1 { color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 10px; }
+            #logs { white-space: pre-wrap; word-wrap: break-word; }
+            .log-entry { margin-bottom: 4px; display: flex; }
+            .timestamp { color: #8b949e; min-width: 100px; }
+            .INFO { color: #3fb950; }
+            .ERROR { color: #f85149; font-weight: bold; }
+            .autoscroll { position: fixed; top: 20px; right: 20px; background: #21262d; border: 1px solid #30363d; color: white; padding: 5px 10px; cursor: pointer; border-radius: 6px; }
+        </style>
+    </head>
+    <body>
+        <h1>🚀 Media Banai Bot - Live Logs</h1>
+        <button class="autoscroll" onclick="toggleScroll()">Auto-Scroll: ON</button>
+        <div id="logs">Loading...</div>
+
+        <script>
+            let autoScroll = true;
+            function toggleScroll() {
+                autoScroll = !autoScroll;
+                document.querySelector('.autoscroll').innerText = 'Auto-Scroll: ' + (autoScroll ? 'ON' : 'OFF');
+            }
+
+            async function fetchLogs() {
+                try {
+                    const res = await fetch('/api/logs');
+                    const data = await res.json();
+                    const container = document.getElementById('logs');
+                    
+                    container.innerHTML = data.map(log => 
+                        \`<div class="log-entry">
+                            <span class="timestamp">[\${log.time}]</span>
+                            <span class="\${log.type}">\${log.type}:</span>&nbsp;
+                            <span>\${log.message}</span>
+                        </div>\`
+                    ).join('');
+
+                    if (autoScroll) window.scrollTo(0, document.body.scrollHeight);
+                } catch (e) { console.error(e); }
+            }
+
+            setInterval(fetchLogs, 2000); // Refresh every 2 seconds
+            fetchLogs();
+        </script>
+    </body>
+    </html>
+    `;
+    res.send(html);
+});
+
+// Launch
 if (process.env.NODE_ENV === 'production') {
     app.use(bot.webhookCallback('/bot'));
     bot.telegram.setWebhook(`${config.APP_URL}/bot`);
