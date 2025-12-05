@@ -1,7 +1,7 @@
 {
-  "name": "media-bot-final",
-  "version": "5.0.0",
-  "description": "Hybrid Downloader",
+  "name": "media-banai-bot",
+  "version": "1.0.0",
+  "description": "Professional Reddit & Twitter Downloader",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
