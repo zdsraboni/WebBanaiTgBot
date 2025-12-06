@@ -4,19 +4,32 @@ const fs = require('fs');
 // Imports
 const config = require('./src/config/settings');
 const logger = require('./src/utils/logger');
-// UPDATED PATH BELOW:
-const { handleMessage, handleCallback } = require('./src/utils/handlers');
+const db = require('./src/utils/db'); // Import DB
+// Ensure you have the updated handlers from the previous step!
+const { handleMessage, handleCallback, handleAdmin } = require('./src/utils/handlers');
 const { setupServer } = require('./src/server/web');
 
-// 1. Initialize Logger & Folders
+// 1. Initialize Logger, Folders & Database
 logger.init();
 if (!fs.existsSync(config.DOWNLOAD_DIR)) fs.mkdirSync(config.DOWNLOAD_DIR, { recursive: true });
+
+// CONNECT TO DATABASE
+db.connect(); 
 
 // 2. Initialize Bot
 const bot = new Telegraf(config.BOT_TOKEN);
 
 // 3. Register Handlers
-bot.start((ctx) => ctx.reply("👋 Welcome to Media Banai Bot!\nI am ready with Live Logs."));
+bot.start((ctx) => {
+    if (ctx.from) db.addUser(ctx.from.id); // Save user to Mongo
+    ctx.reply("👋 Welcome to Media Banai Bot!\nI am ready with Live Logs.");
+});
+
+// Admin Commands
+bot.command('stats', handleAdmin);
+bot.command('broadcast', handleAdmin);
+
+// Standard Handlers
 bot.on('text', handleMessage);
 bot.on('callback_query', handleCallback);
 
