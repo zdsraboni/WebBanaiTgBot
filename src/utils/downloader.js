@@ -34,7 +34,6 @@ class Downloader {
         } catch (e) { throw new Error(`Info fetch failed: ${e.message}`); }
     }
 
-    // Main Download Function (Video/Audio)
     async download(url, isAudio, formatId, outputPath) {
         let typeArg = "";
         if (isAudio) typeArg = `-x --audio-format mp3 -o "${outputPath}.%(ext)s"`;
@@ -45,16 +44,24 @@ class Downloader {
         await this.execute(`${typeArg} "${url}"`);
     }
 
-    // NEW: Simple File Downloader (For Images)
+    // --- FIXED IMAGE DOWNLOADER ---
     async downloadFile(url, outputPath) {
         const writer = fs.createWriteStream(outputPath);
+        
+        // We MUST use a real browser User-Agent or Instagram/CDN will block the download (403)
         const response = await axios({
             url,
             method: 'GET',
             responseType: 'stream',
-            headers: { 'User-Agent': config.UA_ANDROID }
+            headers: { 
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://www.instagram.com/',
+                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+            }
         });
+
         response.data.pipe(writer);
+
         return new Promise((resolve, reject) => {
             writer.on('finish', resolve);
             writer.on('error', reject);
@@ -63,3 +70,5 @@ class Downloader {
 }
 
 module.exports = new Downloader();
+
+
