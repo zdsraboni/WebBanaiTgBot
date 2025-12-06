@@ -4,15 +4,19 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 
-// Import Version from package.json
+// Import Version
 const { version } = require('./package.json');
 
 // Import Modules
 const config = require('./src/config/settings');
 const logger = require('./src/utils/logger');
 const downloader = require('./src/utils/downloader');
+
+// Import Services
 const redditService = require('./src/services/reddit');
 const twitterService = require('./src/services/twitter');
+const instagramService = require('./src/services/instagram'); // NEW
+const tiktokService = require('./src/services/tiktok');       // NEW
 
 // Init Logger
 logger.init();
@@ -32,7 +36,7 @@ const resolveRedirect = async (url) => {
 };
 
 // --- HANDLER ---
-bot.start((ctx) => ctx.reply(`👋 **Media Banai Bot v${version}**\n\nStable Release.\nSend Reddit or Twitter links.`));
+bot.start((ctx) => ctx.reply(`👋 **Media Banai Bot v${version}**\n\n✅ Reddit & Twitter\n✅ Instagram & TikTok\n\nSend a link!`));
 
 bot.on('text', async (ctx) => {
     const match = ctx.message.text.match(config.URL_REGEX);
@@ -46,10 +50,15 @@ bot.on('text', async (ctx) => {
         const fullUrl = await resolveRedirect(inputUrl);
         let media = null;
 
+        // --- ROUTING LOGIC ---
         if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
             media = await twitterService.extract(fullUrl);
-        } else {
+        } else if (fullUrl.includes('reddit.com') || fullUrl.includes('redd.it')) {
             media = await redditService.extract(fullUrl);
+        } else if (fullUrl.includes('instagram.com')) {
+            media = await instagramService.extract(fullUrl);
+        } else if (fullUrl.includes('tiktok.com')) {
+            media = await tiktokService.extract(fullUrl);
         }
 
         if (!media) throw new Error("Media not found");
@@ -65,12 +74,22 @@ bot.on('text', async (ctx) => {
             buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
         } 
         else if (media.type === 'video') {
-            if (media.formats?.length > 0) {
-                media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height).slice(0, 5).forEach(f => {
-                    if(!buttons.some(b => b[0].text.includes(f.height))) 
-                        buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]);
-                });
-            } else {
+            // Check for qualities (Insta/TikTok usually just have 'best')
+            if (media.formats && media.formats.length > 0) {
+                const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height).slice(0, 5);
+                
+                // Only show resolution buttons if we have valid height data
+                // TikTok/Insta often give many duplicate formats, so we stick to 'best' for them mostly
+                if (formats.length > 0 && !fullUrl.includes('tiktok') && !fullUrl.includes('instagram')) {
+                     formats.forEach(f => {
+                        if(!buttons.some(b => b[0].text.includes(f.height))) 
+                            buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]);
+                    });
+                }
+            }
+            
+            // If no specific buttons added, add default "Download Video"
+            if (buttons.length === 0) {
                 buttons.push([Markup.button.callback("📹 Download Video", `vid|best`)]);
             }
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
@@ -97,6 +116,7 @@ bot.on('callback_query', async (ctx) => {
     } 
     else if (action === 'alb') {
         await ctx.answerCbQuery("🚀 Processing...");
+        // For albums, we assume Reddit/Twitter mostly. Re-extraction is safest.
         let media = null;
         if (url.includes('x.com') || url.includes('twitter')) media = await twitterService.extract(url);
         else media = await redditService.extract(url);
@@ -137,7 +157,6 @@ bot.on('callback_query', async (ctx) => {
 
 // --- LIVE TAIL PAGE ---
 app.get('/api/logs', (req, res) => res.json(logger.getLogs()));
-// Server now displays the version
 app.get('/', (req, res) => res.send(`<html><head><meta http-equiv="refresh" content="2"><title>Media Banai v${version}</title></head><body style="background:#0d1117;color:#c9d1d9;font-family:monospace;padding:20px"><h1>🚀 Media Banai Bot v${version}</h1><div id="logs">Loading...</div><script>fetch('/api/logs').then(r=>r.json()).then(d=>document.getElementById('logs').innerHTML=d.map(l=>\`<div style="border-bottom:1px solid #30363d;padding:2px"><span style="color:#8b949e">[\${l.time}]</span> <span style="color:\${l.type==='ERROR'?'#f85149':'#3fb950'}">\${l.type}</span> \${l.message}</div>\`).join(''))</script></body></html>`));
 
 if (process.env.NODE_ENV === 'production') {
