@@ -2,7 +2,7 @@ const axios = require('axios');
 const config = require('../config/settings');
 
 const resolveRedirect = async (url) => {
-    // Skip TikTok short links (handled by API)
+    // Skip TikTok short links
     if (!url.includes('/s/') && !url.includes('vm.tiktok') && !url.includes('vt.tiktok')) return url;
     
     try {
@@ -15,4 +15,14 @@ const resolveRedirect = async (url) => {
     } catch (e) { return url; }
 };
 
-module.exports = { resolveRedirect };
+// NEW: File Size Formatter
+const formatBytes = (bytes, decimals = 2) => {
+    if (!bytes || bytes === 0) return 'N/A';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+};
+
+module.exports = { resolveRedirect, formatBytes };
