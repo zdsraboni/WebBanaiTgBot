@@ -8,24 +8,21 @@ const downloader = require('./downloader');
 const redditService = require('../services/reddit');
 const twitterService = require('../services/twitter');
 
-// --- HELPER: GENERATE UI CAPTION ---
-const generateCaption = (title, author, sourceUrl) => {
-    // Truncate title if too long (Telegram limit is 1024 chars, but we keep it clean)
+// --- HELPER: GENERATE NEW UI CAPTION ---
+// This function creates the exact UI style from your screenshot
+const generateCaption = (title, platform, sourceUrl) => {
+    // Truncate title to keep it clean
     const cleanTitle = title.length > 200 ? title.substring(0, 197) + '...' : title;
-    
-    // HTML Template
-    return `
-🎬 <b>${cleanTitle.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</b>
+    // Escape HTML special characters
+    const safeTitle = cleanTitle.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-👤 <b>Author:</b> ${author}
-🔗 <a href="${sourceUrl}">View Post</a>
-
-🤖 <i>Downloaded via Media Banai</i>
-    `.trim();
+    // THE NEW UI TEMPLATE
+    // 🎬 platform media | source
+    // > blockquote title
+    return `🎬 <b>${platform} media</b> | <a href="${sourceUrl}">source</a>\n\n<blockquote>${safeTitle}</blockquote>`;
 };
 
 // --- SHARED DOWNLOAD FUNCTION ---
-// Now accepts 'captionText' instead of generating a generic one
 const performDownload = async (ctx, url, isAudio, qualityId, messageIdToEdit, captionText) => {
     try {
         await ctx.telegram.editMessageText(
@@ -50,7 +47,6 @@ const performDownload = async (ctx, url, isAudio, qualityId, messageIdToEdit, ca
 
         await ctx.telegram.editMessageText(ctx.chat.id, messageIdToEdit, null, "📤 *Uploading...*", { parse_mode: 'Markdown' });
         
-        // Upload with Beautiful Caption
         if (isAudio) {
             await ctx.replyWithAudio({ source: finalFile }, { 
                 caption: captionText || '🎵 Audio extracted by Media Banai',
@@ -86,23 +82,25 @@ const handleMessage = async (ctx) => {
     try {
         const fullUrl = await resolveRedirect(match[0]);
         let media = null;
+        let platformName = 'Social';
 
         if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
             media = await twitterService.extract(fullUrl);
+            platformName = 'Twitter';
         } else {
             media = await redditService.extract(fullUrl);
+            platformName = 'Reddit';
         }
 
         if (!media) throw new Error("Media not found");
 
         const safeUrl = media.url || media.source;
-        // Generate the beautiful caption here because we have all the data
-        const prettyCaption = generateCaption(media.title, media.author, media.source);
+        // Generate the new pretty caption
+        const prettyCaption = generateCaption(media.title, platformName, media.source);
 
         // --- AUTO-DOWNLOAD (Quality Check Failed) ---
         if (media.type === 'video' && (!media.formats || media.formats.length === 0)) {
             console.log("⚠️ No resolutions found. Auto-Downloading.");
-            // Pass the pretty caption to the downloader
             return await performDownload(ctx, safeUrl, false, 'best', msg.message_id, prettyCaption);
         }
 
@@ -146,15 +144,19 @@ const handleMessage = async (ctx) => {
 const handleCallback = async (ctx) => {
     const [action, id] = ctx.callbackQuery.data.split('|');
     
-    // We try to reconstruct the info from the message itself
     const messageText = ctx.callbackQuery.message.text || "Media Content";
     const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
     
     if (!url) return ctx.answerCbQuery("❌ Link expired.");
 
-    // Attempt to extract Title from the message text (Remove "✅ " and newlines)
+    // Guess platform from URL
+    let platformName = 'Social';
+    if (url.includes('twitter') || url.includes('x.com')) platformName = 'Twitter';
+    else if (url.includes('reddit')) platformName = 'Reddit';
+
     const rawTitle = messageText.split('\n')[0].replace('✅ ', '');
-    const niceCaption = generateCaption(rawTitle, "Unknown (Button Mode)", url);
+    // Generate caption for button clicks
+    const niceCaption = generateCaption(rawTitle, platformName, url);
 
     if (action === 'img') {
         await ctx.answerCbQuery("🚀 Sending...");
@@ -163,7 +165,6 @@ const handleCallback = async (ctx) => {
         await ctx.deleteMessage();
     }
     else if (action === 'alb') {
-        // Albums are complex, we keep them simple or re-fetch. Keeping simple for speed.
         await ctx.answerCbQuery("🚀 Processing...");
         let media = null;
         if (url.includes('x.com') || url.includes('twitter')) media = await twitterService.extract(url);
@@ -173,7 +174,6 @@ const handleCallback = async (ctx) => {
             await ctx.deleteMessage();
             for (const item of media.items) {
                 try {
-                    // Send without caption or simple caption
                     if(item.type==='video') await ctx.replyWithVideo(item.url);
                     else await ctx.replyWithDocument(item.url);
                 } catch {}
@@ -182,7 +182,6 @@ const handleCallback = async (ctx) => {
     }
     else {
         await ctx.answerCbQuery("🚀 Downloading...");
-        // Pass the caption we reconstructed
         await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, niceCaption);
     }
 };
