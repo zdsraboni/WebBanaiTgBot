@@ -6,28 +6,37 @@ class InstagramService {
             console.log(`📸 Instagram Service: ${url}`);
             const info = await downloader.getInfo(url);
 
-            const result = {
+            const baseInfo = {
                 title: info.title || 'Instagram Media',
                 source: url,
                 formats: info.formats || []
             };
 
-            // Detect Type
-            if (info.url) {
-                // Direct Video URL found
-                result.type = 'video';
-                result.url = info.url;
-            } else if (info.thumbnails && info.thumbnails.length > 0) {
-                // Fallback for images
-                result.type = 'image';
-                result.url = info.thumbnails[info.thumbnails.length - 1].url;
-            } else {
-                // Default to video if unsure (yt-dlp usually handles it)
-                result.type = 'video';
-                result.url = url;
+            // 1. Carousel / Gallery (Multiple Images/Videos)
+            if (info._type === 'playlist' && info.entries) {
+                const items = info.entries.map(entry => ({
+                    type: entry.ext === 'mp4' ? 'video' : 'image',
+                    url: entry.url
+                }));
+                return { ...baseInfo, type: 'gallery', items };
             }
 
-            return result;
+            // 2. Single Video
+            if (info.ext === 'mp4' || info.url?.includes('.mp4')) {
+                return {
+                    ...baseInfo,
+                    type: 'video',
+                    url: info.url // Direct Video Link
+                };
+            }
+
+            // 3. Single Image
+            // yt-dlp puts the image link in 'url' for simple posts
+            return {
+                ...baseInfo,
+                type: 'image',
+                url: info.url
+            };
 
         } catch (e) {
             console.error("Instagram Error:", e.message);
