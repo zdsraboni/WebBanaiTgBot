@@ -14,8 +14,8 @@ module.exports = {
     // Identity
     UA_ANDROID: 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
     
-    // UPDATED REGEX: Now catches Insta, TikTok, Reddit, and X
-    URL_REGEX: /(https?:\/\/(?:www\.|old\.|mobile\.|m\.)?(?:reddit\.com|redd\.it|x\.com|twitter\.com|instagram\.com|tiktok\.com|vm\.tiktok\.com)\/[^\s]+)/i,
+    // UPDATED REGEX: Added TikTok (vm, vt, regular)
+    URL_REGEX: /(https?:\/\/(?:www\.|old\.|mobile\.|m\.)?(?:reddit\.com|redd\.it|x\.com|twitter\.com|instagram\.com|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)\/[^\s]+)/i,
     
     // Reddit Mirrors
     REDDIT_MIRRORS: [
