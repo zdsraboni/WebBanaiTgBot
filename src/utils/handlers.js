@@ -1,15 +1,66 @@
 const { Markup } = require('telegraf');
 const fs = require('fs');
 const path = require('path');
-const config = require('../config/settings'); // Up one level to src, then config
+const config = require('../config/settings');
 
-// Import Local Utils (Same folder now)
 const { resolveRedirect } = require('./helpers'); 
 const downloader = require('./downloader');
-
-// Import Services (Up one level to src, then services)
 const redditService = require('../services/reddit');
 const twitterService = require('../services/twitter');
+
+// --- SHARED DOWNLOAD FUNCTION ---
+// This handles the actual downloading and uploading logic
+const performDownload = async (ctx, url, isAudio, qualityId, messageIdToEdit) => {
+    try {
+        // 1. Update status to Downloading
+        await ctx.telegram.editMessageText(
+            ctx.chat.id, 
+            messageIdToEdit, 
+            null, 
+            `⏳ *Downloading...*\n_Please wait, this might take a moment._`, 
+            { parse_mode: 'Markdown' }
+        );
+
+        const timestamp = Date.now();
+        const basePath = path.join(config.DOWNLOAD_DIR, `${timestamp}`);
+        const finalFile = `${basePath}.${isAudio ? 'mp3' : 'mp4'}`;
+
+        console.log(`⬇️ Starting Download: ${url}`);
+        
+        // 2. Run the download
+        await downloader.download(url, isAudio, qualityId, basePath);
+
+        // 3. Check file size
+        const stats = fs.statSync(finalFile);
+        if (stats.size > 49.5 * 1024 * 1024) {
+            await ctx.telegram.editMessageText(ctx.chat.id, messageIdToEdit, null, "⚠️ File > 50MB (Telegram Limit). Cannot upload.");
+            if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
+            return;
+        }
+
+        // 4. Upload
+        await ctx.telegram.editMessageText(ctx.chat.id, messageIdToEdit, null, "📤 *Uploading...*", { parse_mode: 'Markdown' });
+        
+        if (isAudio) {
+            await ctx.replyWithAudio({ source: finalFile }, { caption: '🎵 Audio extracted by Media Banai' });
+        } else {
+            await ctx.replyWithVideo({ source: finalFile }, { caption: '🚀 Downloaded via Media Banai' });
+        }
+
+        console.log(`✅ Upload Success: ${url}`);
+
+        // 5. Cleanup: Delete the "Downloading..." message and the file
+        await ctx.telegram.deleteMessage(ctx.chat.id, messageIdToEdit).catch(() => {});
+        if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
+
+    } catch (e) {
+        console.error(`Download Error: ${e.message}`);
+        await ctx.telegram.editMessageText(ctx.chat.id, messageIdToEdit, null, "❌ Error during download/upload.");
+        // Try cleanup
+        const basePath = path.join(config.DOWNLOAD_DIR, `${Date.now()}`); // approximate path
+        if (fs.existsSync(`${basePath}.mp4`)) fs.unlinkSync(`${basePath}.mp4`);
+    }
+};
 
 // --- MESSAGE HANDLER ---
 const handleMessage = async (ctx) => {
@@ -32,7 +83,18 @@ const handleMessage = async (ctx) => {
 
         if (!media) throw new Error("Media not found");
 
-        // Generate Buttons
+        const safeUrl = media.url || media.source;
+
+        // --- AUTO-DOWNLOAD LOGIC START ---
+        // If it's a video BUT has no formats (Quality Check Failed), download immediately.
+        if (media.type === 'video' && (!media.formats || media.formats.length === 0)) {
+            console.log("⚠️ No resolutions found. Switching to Auto-Download.");
+            // Directly call the download function using the "Analyzing..." message ID
+            return await performDownload(ctx, safeUrl, false, 'best', msg.message_id);
+        }
+        // --- AUTO-DOWNLOAD LOGIC END ---
+
+        // Normal Flow: Show Buttons
         const buttons = [];
         let text = `✅ *${(media.title).substring(0, 50)}...*`;
 
@@ -45,23 +107,18 @@ const handleMessage = async (ctx) => {
             buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
         } 
         else if (media.type === 'video') {
-            if (media.formats && media.formats.length > 0) {
-                const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height);
-                const seen = new Set();
-                formats.slice(0, 5).forEach(f => {
-                    if(!seen.has(f.height)) {
-                        seen.add(f.height);
-                        buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]);
-                    }
-                });
-            } else {
-                buttons.push([Markup.button.callback("📹 Download Video", `vid|best`)]);
-            }
+            // We only get here if formats exist (Success case)
+            const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height);
+            const seen = new Set();
+            formats.slice(0, 5).forEach(f => {
+                if(!seen.has(f.height)) {
+                    seen.add(f.height);
+                    buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]);
+                }
+            });
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
 
-        const safeUrl = media.url || media.source; 
-        
         await ctx.telegram.editMessageText(
             ctx.chat.id, msg.message_id, null,
             `${text}\nSource: [Link](${safeUrl})`,
@@ -78,6 +135,7 @@ const handleMessage = async (ctx) => {
 const handleCallback = async (ctx) => {
     const [action, id] = ctx.callbackQuery.data.split('|');
     const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
+    
     if (!url) return ctx.answerCbQuery("❌ Link expired.");
 
     if (action === 'img') {
@@ -102,34 +160,10 @@ const handleCallback = async (ctx) => {
         }
     }
     else {
+        // Video/Audio Download Button Clicked
         await ctx.answerCbQuery("🚀 Downloading...");
-        await ctx.editMessageText(`⏳ *Downloading...*`, { parse_mode: 'Markdown' });
-        
-        const timestamp = Date.now();
-        const basePath = path.join(config.DOWNLOAD_DIR, `${timestamp}`);
-        const finalFile = `${basePath}.${action === 'aud' ? 'mp3' : 'mp4'}`;
-
-        try {
-            console.log(`⬇️ Starting Download: ${url}`);
-            await downloader.download(url, action === 'aud', id, basePath);
-
-            const stats = fs.statSync(finalFile);
-            if (stats.size > 49.5 * 1024 * 1024) {
-                await ctx.editMessageText("⚠️ File > 50MB (Telegram Limit).");
-            } else {
-                await ctx.editMessageText("📤 *Uploading...*", { parse_mode: 'Markdown' });
-                action === 'aud' 
-                    ? await ctx.replyWithAudio({ source: finalFile })
-                    : await ctx.replyWithVideo({ source: finalFile });
-                await ctx.deleteMessage();
-                console.log(`✅ Upload Success: ${url}`);
-            }
-        } catch (e) {
-            console.error(`Download Error: ${e.message}`);
-            await ctx.editMessageText("❌ Error during download.");
-        } finally {
-            if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
-        }
+        // Pass the message ID of the menu so it gets edited to "Downloading..."
+        await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id);
     }
 };
 
