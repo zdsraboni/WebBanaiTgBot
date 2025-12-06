@@ -1,197 +1,32 @@
-const { Telegraf, Markup } = require('telegraf');
-const express = require('express');
+const { Telegraf } = require('telegraf');
 const fs = require('fs');
-const path = require('path');
-const axios = require('axios');
 
-// Import Version
-const { version } = require('./package.json');
-
-// Import Modules
+// 1. Config & Logger
 const config = require('./src/config/settings');
 const logger = require('./src/utils/logger');
-const downloader = require('./src/utils/downloader');
+logger.init(); // Must be first
 
-// Import Services
-const redditService = require('./src/services/reddit');
-const twitterService = require('./src/services/twitter');
-const instagramService = require('./src/services/instagram');
-const tiktokService = require('./src/services/tiktok');
+// 2. Import Controllers
+const messageHandler = require('./src/controllers/messageHandler');
+const callbackHandler = require('./src/controllers/callbackHandler');
+const webServer = require('./src/server/web');
+const { version } = require('./package.json');
 
-// Init Logger
-logger.init();
-
+// 3. Init Bot
 const bot = new Telegraf(config.BOT_TOKEN);
-const app = express();
 
+// Ensure Directories
 if (!fs.existsSync(config.DOWNLOAD_DIR)) fs.mkdirSync(config.DOWNLOAD_DIR, { recursive: true });
 
-// --- UTILITIES ---
-const resolveRedirect = async (url) => {
-    if (!url.includes('/s/') && !url.includes('vm.tiktok') && !url.includes('vt.tiktok')) return url;
-    try {
-        const res = await axios.head(url, { maxRedirects: 0, validateStatus: s => s >= 300 && s < 400, headers: { 'User-Agent': config.UA_ANDROID } });
-        return res.headers.location || url;
-    } catch (e) { return url; }
-};
+// 4. Register Handlers
+bot.start((ctx) => ctx.reply(`👋 **Media Banai Bot v${version}**\n\n✅ Reddit, Twitter\n✅ Instagram, TikTok\n\nSend a link!`));
 
-// --- HANDLER ---
-bot.start((ctx) => ctx.reply(`👋 **Media Banai Bot v${version}**\n\n✅ Reddit & Twitter\n✅ Instagram & TikTok\n\nSend a link!`));
+bot.on('text', messageHandler.handleMessage);
+bot.on('callback_query', callbackHandler.handleCallback);
 
-bot.on('text', async (ctx) => {
-    const match = ctx.message.text.match(config.URL_REGEX);
-    if (!match) return;
+// 5. Start Server
+webServer.start(bot);
 
-    console.log(`📩 Request: ${match[0]}`);
-    const msg = await ctx.reply("🔍 *Analyzing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
-
-    try {
-        const inputUrl = match[0];
-        const fullUrl = await resolveRedirect(inputUrl);
-        let media = null;
-
-        // --- ROUTING ---
-        if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
-            media = await twitterService.extract(fullUrl);
-        } else if (fullUrl.includes('reddit.com') || fullUrl.includes('redd.it')) {
-            media = await redditService.extract(fullUrl);
-        } else if (fullUrl.includes('instagram.com')) {
-            media = await instagramService.extract(fullUrl);
-        } else if (fullUrl.includes('tiktok.com')) {
-            media = await tiktokService.extract(fullUrl);
-        }
-
-        if (!media) throw new Error("Media not found");
-
-        const buttons = [];
-        let text = `✅ *${(media.title || 'Media Found').substring(0, 50)}...*`;
-
-        if (media.type === 'gallery') {
-            text += `\n📚 **Gallery:** ${media.items.length} items`;
-            buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
-        } 
-        else if (media.type === 'image') {
-            buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
-        } 
-        else if (media.type === 'video') {
-            if (media.formats && media.formats.length > 0 && !fullUrl.includes('tiktok') && !fullUrl.includes('instagram')) {
-                const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height).slice(0, 5);
-                formats.forEach(f => {
-                    if(!buttons.some(b => b[0].text.includes(f.height))) 
-                        buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]);
-                });
-            }
-            if (buttons.length === 0) buttons.push([Markup.button.callback("📹 Download Video", `vid|best`)]);
-            buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
-        }
-
-        const safeUrl = (media.type === 'video' && media.url) ? media.url : (media.source || fullUrl);
-
-        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, `${text}\n[Source](${safeUrl})`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
-
-    } catch (e) {
-        console.error(e);
-        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed. Content unavailable.");
-    }
-});
-
-// --- CALLBACKS ---
-bot.on('callback_query', async (ctx) => {
-    const [action, id] = ctx.callbackQuery.data.split('|');
-    const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
-    if (!url) return ctx.answerCbQuery("❌ Expired");
-
-    // --- INSTAGRAM IMAGE FIX ---
-    if (action === 'img') {
-        await ctx.answerCbQuery("🚀 Downloading...");
-        const timestamp = Date.now();
-        const imgPath = path.join(config.DOWNLOAD_DIR, `${timestamp}.jpg`);
-        
-        try {
-            // 1. Download to Render Server first
-            await downloader.downloadFile(url, imgPath);
-            // 2. Upload Local File to Telegram
-            await ctx.replyWithPhoto({ source: imgPath });
-            await ctx.deleteMessage();
-        } catch (e) {
-            console.error("Image dl failed:", e.message);
-            // Fallback
-            try { await ctx.replyWithDocument(url); } catch {}
-        } finally {
-            if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath);
-        }
-    } 
-    else if (action === 'alb') {
-        await ctx.answerCbQuery("🚀 Processing...");
-        await ctx.editMessageText("⏳ *Fetching Album...*", { parse_mode: 'Markdown' });
-        
-        let media = null;
-        if (url.includes('tiktok.com')) media = await tiktokService.extract(url);
-        else if (url.includes('instagram.com')) media = await instagramService.extract(url);
-        else if (url.includes('x.com')) media = await twitterService.extract(url);
-        else media = await redditService.extract(url);
-
-        if (media?.type === 'gallery') {
-            await ctx.editMessageText(`📤 *Sending ${media.items.length} items...*`, { parse_mode: 'Markdown' });
-            for (const item of media.items) {
-                try {
-                    if (item.type === 'video') await ctx.replyWithVideo(item.url);
-                    else {
-                        // Download Gallery Image Locally too
-                        const tmpName = path.join(config.DOWNLOAD_DIR, `gal_${Date.now()}_${Math.random()}.jpg`);
-                        await downloader.downloadFile(item.url, tmpName);
-                        await ctx.replyWithDocument({ source: tmpName });
-                        fs.unlinkSync(tmpName);
-                    }
-                } catch (e) {}
-            }
-            await ctx.deleteMessage();
-        } else {
-            await ctx.editMessageText("❌ Failed.");
-        }
-    } 
-    else {
-        await ctx.answerCbQuery("🚀 Downloading...");
-        await ctx.editMessageText(`⏳ *Downloading...*`, { parse_mode: 'Markdown' });
-        
-        const timestamp = Date.now();
-        const basePath = path.join(config.DOWNLOAD_DIR, `${timestamp}`);
-        const isAudio = action === 'aud';
-        const finalFile = `${basePath}.${isAudio ? 'mp3' : 'mp4'}`;
-
-        try {
-            if (id === 'best' && (url.includes('.mp4') || url.includes('.mp3'))) {
-                await downloader.downloadFile(url, finalFile);
-            } else {
-                await downloader.download(url, isAudio, id, basePath);
-            }
-
-            const stats = fs.statSync(finalFile);
-            if (stats.size > 49.5 * 1024 * 1024) await ctx.editMessageText("⚠️ File > 50MB");
-            else {
-                await ctx.editMessageText("📤 *Uploading...*", { parse_mode: 'Markdown' });
-                if (isAudio) await ctx.replyWithAudio({ source: finalFile });
-                else await ctx.replyWithVideo({ source: finalFile });
-                await ctx.deleteMessage();
-            }
-        } catch (e) {
-            console.error("DL Error:", e);
-            await ctx.editMessageText("❌ Error.");
-        } finally {
-            if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
-        }
-    }
-});
-
-// --- SERVER ---
-app.get('/api/logs', (req, res) => res.json(logger.getLogs()));
-app.get('/', (req, res) => res.send(`<html><head><meta http-equiv="refresh" content="2"><title>Media Banai v${version}</title></head><body style="background:#0d1117;color:#c9d1d9;font-family:monospace;padding:20px"><h1>🚀 Media Banai Bot v${version}</h1><div id="logs">Loading...</div><script>fetch('/api/logs').then(r=>r.json()).then(d=>document.getElementById('logs').innerHTML=d.map(l=>\`<div>[\${l.time}] \${l.message}</div>\`).join(''))</script></body></html>`));
-
-if (process.env.NODE_ENV === 'production') {
-    app.use(bot.webhookCallback('/bot'));
-    bot.telegram.setWebhook(`${config.APP_URL}/bot`);
-    app.listen(config.PORT, '0.0.0.0', () => console.log(`🚀 Server on ${config.PORT}`));
-} else { bot.launch(); }
-
+// Graceful Stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
