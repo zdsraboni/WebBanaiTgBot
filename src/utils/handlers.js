@@ -8,18 +8,18 @@ const downloader = require('./downloader');
 const redditService = require('../services/reddit');
 const twitterService = require('../services/twitter');
 
-// --- HELPER: GENERATE NEW UI CAPTION ---
-// This function creates the exact UI style from your screenshot
-const generateCaption = (title, platform, sourceUrl) => {
-    // Truncate title to keep it clean
-    const cleanTitle = title.length > 200 ? title.substring(0, 197) + '...' : title;
-    // Escape HTML special characters
-    const safeTitle = cleanTitle.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// --- HELPER: GENERATE UI CAPTION ---
+const generateCaption = (text, platform, sourceUrl) => {
+    // 1. Telegram Limit Strategy
+    // Telegram caption limit is 1024 chars. We reserve ~100 chars for our UI tags.
+    // So we allow up to 900 characters of the actual text before cutting.
+    const cleanText = text.length > 900 ? text.substring(0, 897) + '...' : text;
+    
+    // 2. Escape HTML (Security)
+    const safeText = cleanText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-    // THE NEW UI TEMPLATE
-    // 🎬 platform media | source
-    // > blockquote title
-    return `🎬 <b>${platform} media</b> | <a href="${sourceUrl}">source</a>\n\n<blockquote>${safeTitle}</blockquote>`;
+    // 3. The "Screenshot Style" UI
+    return `🎬 <b>${platform} media</b> | <a href="${sourceUrl}">source</a>\n\n<blockquote>${safeText}</blockquote>`;
 };
 
 // --- SHARED DOWNLOAD FUNCTION ---
@@ -66,6 +66,7 @@ const performDownload = async (ctx, url, isAudio, qualityId, messageIdToEdit, ca
     } catch (e) {
         console.error(`Download Error: ${e.message}`);
         await ctx.telegram.editMessageText(ctx.chat.id, messageIdToEdit, null, "❌ Error during download.");
+        // Cleanup
         const basePath = path.join(config.DOWNLOAD_DIR, `${Date.now()}`);
         if (fs.existsSync(`${basePath}.mp4`)) fs.unlinkSync(`${basePath}.mp4`);
     }
@@ -73,14 +74,20 @@ const performDownload = async (ctx, url, isAudio, qualityId, messageIdToEdit, ca
 
 // --- MESSAGE HANDLER ---
 const handleMessage = async (ctx) => {
-    const match = ctx.message.text.match(config.URL_REGEX);
+    const messageText = ctx.message.text;
+    const match = messageText.match(config.URL_REGEX);
     if (!match) return;
 
-    console.log(`📩 New Request: ${match[0]}`);
+    // 1. Check for Custom User Caption
+    // We remove the URL from the message. If anything is left, that's the custom caption.
+    const inputUrl = match[0];
+    const userCustomCaption = messageText.replace(inputUrl, '').trim();
+
+    console.log(`📩 New Request: ${inputUrl} | Custom Caption: ${userCustomCaption ? 'YES' : 'NO'}`);
     const msg = await ctx.reply("🔍 *Analyzing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
-        const fullUrl = await resolveRedirect(match[0]);
+        const fullUrl = await resolveRedirect(inputUrl);
         let media = null;
         let platformName = 'Social';
 
@@ -95,8 +102,12 @@ const handleMessage = async (ctx) => {
         if (!media) throw new Error("Media not found");
 
         const safeUrl = media.url || media.source;
-        // Generate the new pretty caption
-        const prettyCaption = generateCaption(media.title, platformName, media.source);
+
+        // 2. Decide which text to use (Custom OR Original)
+        const finalTitleText = userCustomCaption.length > 0 ? userCustomCaption : media.title;
+        
+        // 3. Generate the UI
+        const prettyCaption = generateCaption(finalTitleText, platformName, media.source);
 
         // --- AUTO-DOWNLOAD (Quality Check Failed) ---
         if (media.type === 'video' && (!media.formats || media.formats.length === 0)) {
@@ -106,14 +117,16 @@ const handleMessage = async (ctx) => {
 
         // --- BUTTONS MENU ---
         const buttons = [];
-        let text = `✅ *${(media.title).substring(0, 50)}...*`;
+        
+        // Use the same final text for the "Found:" preview
+        let previewText = `✅ *${finalTitleText.substring(0, 50)}...*`;
 
         if (media.type === 'gallery') {
-            text += `\n📚 **Gallery:** ${media.items.length} items`;
+            previewText += `\n📚 **Gallery:** ${media.items.length} items`;
             buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
         } 
         else if (media.type === 'image') {
-            text += `\n🖼 **Image Detected**`;
+            previewText += `\n🖼 **Image Detected**`;
             buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
         } 
         else if (media.type === 'video') {
@@ -128,9 +141,15 @@ const handleMessage = async (ctx) => {
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
 
+        // We store the "Custom Caption" implicitly by not passing it in callback data
+        // (Callback data is too small). 
+        // Instead, the Callback Handler below will re-extract it from the message text if possible,
+        // or we rely on the fact that the user sees the preview.
+        
+        // Ideally, we just show the preview here.
         await ctx.telegram.editMessageText(
             ctx.chat.id, msg.message_id, null,
-            `${text}\n👤 Author: ${media.author}\nSource: [Link](${safeUrl})`,
+            `${previewText}\n👤 Author: ${media.author}\nSource: [Link](${safeUrl})`,
             { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
         );
 
@@ -143,20 +162,26 @@ const handleMessage = async (ctx) => {
 // --- CALLBACK HANDLER ---
 const handleCallback = async (ctx) => {
     const [action, id] = ctx.callbackQuery.data.split('|');
-    
-    const messageText = ctx.callbackQuery.message.text || "Media Content";
     const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
     
     if (!url) return ctx.answerCbQuery("❌ Link expired.");
 
-    // Guess platform from URL
     let platformName = 'Social';
     if (url.includes('twitter') || url.includes('x.com')) platformName = 'Twitter';
     else if (url.includes('reddit')) platformName = 'Reddit';
 
-    const rawTitle = messageText.split('\n')[0].replace('✅ ', '');
-    // Generate caption for button clicks
-    const niceCaption = generateCaption(rawTitle, platformName, url);
+    // RE-EXTRACT TITLE FROM MENU MESSAGE
+    // The menu message format is: "✅ *Title...*"
+    // We try to grab that title back to use in the caption
+    let titleToUse = "Media Content";
+    const msgText = ctx.callbackQuery.message.text;
+    if (msgText) {
+        // Split by new line, take first line, remove "✅ "
+        const firstLine = msgText.split('\n')[0];
+        titleToUse = firstLine.replace('✅ ', '');
+    }
+
+    const niceCaption = generateCaption(titleToUse, platformName, url);
 
     if (action === 'img') {
         await ctx.answerCbQuery("🚀 Sending...");
