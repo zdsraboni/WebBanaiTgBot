@@ -1,5 +1,6 @@
 // File: src/server/web.js
 const express = require('express');
+const axios = require('axios'); // Added for Self-Ping
 const logger = require('../utils/logger');
 const config = require('../config/settings');
 
@@ -48,7 +49,7 @@ const setupServer = (bot) => {
             <button class="autoscroll" onclick="toggleScroll()" id="scrollBtn">Auto-Scroll: ON</button>
             <script>
                 let autoScroll = true;
-                let displayedLogsCount = 0; // Track how many logs we are currently showing
+                let displayedLogsCount = 0;
                 const logContainer = document.getElementById('logs');
                 const btn = document.getElementById('scrollBtn');
 
@@ -63,16 +64,13 @@ const setupServer = (bot) => {
                         const res = await fetch('/api/logs');
                         const allLogs = await res.json();
 
-                        // 1. If server restarted (fewer logs than we have), reset the screen
                         if (allLogs.length < displayedLogsCount) {
                             logContainer.innerHTML = '';
                             displayedLogsCount = 0;
                         }
 
-                        // 2. Only grab the NEW logs (slice the array)
                         const newLogs = allLogs.slice(displayedLogsCount);
 
-                        // 3. Append only new logs to the DOM
                         if (newLogs.length > 0) {
                             newLogs.forEach(log => {
                                 const div = document.createElement('div');
@@ -85,10 +83,8 @@ const setupServer = (bot) => {
                                 logContainer.appendChild(div);
                             });
 
-                            // Update our counter
                             displayedLogsCount = allLogs.length;
 
-                            // Scroll to bottom if enabled
                             if (autoScroll) {
                                 window.scrollTo(0, document.body.scrollHeight);
                             }
@@ -97,7 +93,6 @@ const setupServer = (bot) => {
                     } catch (e) { console.error("Log fetch failed", e); }
                 }
 
-                // Check for updates every 1.5 seconds
                 setInterval(fetchLogs, 1500);
                 fetchLogs();
             </script>
@@ -106,11 +101,27 @@ const setupServer = (bot) => {
         `);
     });
 
+    // 3. Anti-Sleep Pinger (The New Fix)
+    const keepAlive = () => {
+        if (config.APP_URL) {
+            // Pings the logs API every 10 minutes to fool Render into thinking it's busy
+            axios.get(`${config.APP_URL}/api/logs`)
+                .then(() => console.log("⏰ Keep-Alive Ping Successful"))
+                .catch(e => console.error(`⚠️ Keep-Alive Ping Failed: ${e.message}`));
+        }
+    };
+    // Run every 10 minutes (600,000 ms)
+    setInterval(keepAlive, 600000);
+
+
     // Launch Server logic
     if (process.env.NODE_ENV === 'production') {
         app.use(bot.webhookCallback('/bot'));
         bot.telegram.setWebhook(`${config.APP_URL}/bot`);
         app.listen(config.PORT, '0.0.0.0', () => console.log(`🚀 Server listening on port ${config.PORT}`));
+        
+        // Trigger first ping after 1 minute to ensure server is up
+        setTimeout(keepAlive, 60000); 
     } else {
         bot.launch();
         console.log("🚀 Polling mode started");
