@@ -9,15 +9,26 @@ const downloader = require('./downloader');
 const redditService = require('../services/reddit');
 const twitterService = require('../services/twitter');
 
-// --- HELPER: GENERATE UI CAPTION ---
-const generateCaption = (text, platform, sourceUrl) => {
-    // 1. Clean Text
-    const cleanText = text ? (text.length > 900 ? text.substring(0, 897) + '...' : text) : "Media Content";
-    // 2. Escape HTML
-    const safeText = cleanText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// --- HELPER: COUNTRY CODE TO FLAG ---
+const getFlagEmoji = (code) => {
+    // Default to Bangladesh if no code or invalid code provided
+    if (!code || code.length !== 2) return '🇧🇩';
+    
+    // Magic math to convert 'us' -> '🇺🇸'
+    return code.toUpperCase().replace(/./g, char => 
+        String.fromCodePoint(char.charCodeAt(0) + 127397)
+    );
+};
 
-    // 3. UI Template
-    return `🎬 <b>${platform} media</b> | <a href="${sourceUrl}">source</a>\n\n<blockquote>${safeText}</blockquote>`;
+// --- HELPER: GENERATE UI CAPTION ---
+// Now accepts 'flagEmoji'
+const generateCaption = (text, platform, sourceUrl, flagEmoji) => {
+    const cleanText = text ? (text.length > 900 ? text.substring(0, 897) + '...' : text) : "Media Content";
+    const safeText = cleanText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const validFlag = flagEmoji || '🇧🇩';
+
+    // UI with Flag next to Source
+    return `🎬 <b>${platform} media</b> | <a href="${sourceUrl}">source</a> ${validFlag}\n\n<blockquote>${safeText}</blockquote>`;
 };
 
 // --- HELPER: BUTTONS ---
@@ -59,7 +70,6 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
 
         await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, "📤 *Uploading...*", { parse_mode: 'Markdown' });
         
-        // --- ADD DUAL TRANSLATE BUTTONS ---
         const extraOptions = { 
             caption: captionText || '🚀 Downloaded via Media Banai',
             parse_mode: 'HTML',
@@ -91,9 +101,26 @@ const handleMessage = async (ctx) => {
     if (!match) return;
 
     const inputUrl = match[0];
-    const userCustomCaption = messageText.replace(inputUrl, '').trim();
+    
+    // 1. SPLIT: [Country?] [URL] [CustomCaption?]
+    // We split by the URL to find what is before and what is after
+    const parts = messageText.split(inputUrl);
+    const preText = parts[0].trim(); // Text BEFORE URL
+    const postText = parts[1].trim(); // Text AFTER URL
 
-    console.log(`📩 New Request: ${inputUrl}`);
+    // 2. FLAG LOGIC
+    // If preText is exactly 2 letters (e.g., 'us', 'bd', 'in'), treat it as country code
+    // Otherwise, default to BD
+    let flagEmoji = '🇧🇩';
+    if (preText.length === 2 && /^[a-zA-Z]+$/.test(preText)) {
+        flagEmoji = getFlagEmoji(preText);
+    }
+
+    // 3. CAPTION LOGIC
+    // If user typed 'postText' (after url), use that. Else use media title.
+    const userCustomCaption = postText; 
+
+    console.log(`📩 Request: ${inputUrl} | Flag: ${flagEmoji}`);
     const msg = await ctx.reply("🔍 *Analyzing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
@@ -114,7 +141,8 @@ const handleMessage = async (ctx) => {
         const safeUrl = media.url || media.source;
         const finalTitleText = userCustomCaption.length > 0 ? userCustomCaption : media.title;
         
-        const prettyCaption = generateCaption(finalTitleText, platformName, media.source);
+        // Generate UI with the Flag
+        const prettyCaption = generateCaption(finalTitleText, platformName, media.source, flagEmoji);
 
         // --- AUTO-DOWNLOAD ---
         if (media.type === 'video' && (!media.formats || media.formats.length === 0)) {
@@ -124,7 +152,9 @@ const handleMessage = async (ctx) => {
 
         // --- BUTTONS MENU ---
         const buttons = [];
-        let previewText = `✅ *${finalTitleText.substring(0, 50)}...*`;
+        // WE EMBED THE FLAG IN THE PREVIEW so we can find it later in handleCallback
+        // Format: "✅ 🇧🇩 *Title...*"
+        let previewText = `✅ ${flagEmoji} *${finalTitleText.substring(0, 50)}...*`;
 
         if (media.type === 'gallery') {
             previewText += `\n📚 **Gallery:** ${media.items.length} items`;
@@ -163,53 +193,48 @@ const handleCallback = async (ctx) => {
     const data = ctx.callbackQuery.data;
     const [action, id] = data.split('|');
     
-    // --- TRANSLATE BUTTON LOGIC (Dynamic Lang) ---
+    // --- TRANSLATE BUTTON LOGIC ---
     if (action === 'trans') {
-        const targetLang = id; // 'en' or 'bn'
+        const targetLang = id; 
         const messageCaption = ctx.callbackQuery.message.caption;
-        const entities = ctx.callbackQuery.message.caption_entities;
-        
-        if (!messageCaption) return ctx.answerCbQuery("No text to translate.");
+        if (!messageCaption) return ctx.answerCbQuery("No text.");
 
         await ctx.answerCbQuery(targetLang === 'bn' ? "🇧🇩 Translating..." : "🇺🇸 Translating...");
 
-        // 1. Recover Source URL
+        // RECOVER FLAG from existing caption
+        // Existing caption format: "🎬 Platform media | source 🇧🇩"
+        // We look for the source line and grab the emoji at the end
+        let currentFlag = '🇧🇩'; // Default
+        const sourceLine = messageCaption.split('\n')[0]; // First line
+        const flagMatch = sourceLine.match(/source\s+(.+)$/); // Match "source 🇧🇩"
+        if (flagMatch && flagMatch[1]) {
+            currentFlag = flagMatch[1].trim(); // Extract the emoji
+        }
+
+        const entities = ctx.callbackQuery.message.caption_entities;
         const linkEntity = entities?.find(e => e.type === 'text_link');
         const sourceUrl = linkEntity ? linkEntity.url : "https://google.com";
         
-        // 2. Recover Platform Name
         let platform = 'Social';
         if (messageCaption.toLowerCase().includes('twitter')) platform = 'Twitter';
         else if (messageCaption.toLowerCase().includes('reddit')) platform = 'Reddit';
 
-        // 3. Extract Content
         const lines = messageCaption.split('\n');
         let contentToTranslate = messageCaption;
-        if (lines.length > 2) {
-            contentToTranslate = lines.slice(2).join('\n').trim();
-        }
+        if (lines.length > 2) contentToTranslate = lines.slice(2).join('\n').trim();
 
         try {
-            // 4. Translate to dynamic target language
             const res = await translate(contentToTranslate, { to: targetLang, autoCorrect: true });
-            
-            // 5. Update Caption
-            const newCaption = generateCaption(res.text, platform, sourceUrl);
-            
-            // We keep the buttons so user can switch between English and Bangla
-            await ctx.editMessageCaption(newCaption, { 
-                parse_mode: 'HTML',
-                ...getTranslationButtons()
-            });
-            
+            // PASS RECOVERED FLAG
+            const newCaption = generateCaption(res.text, platform, sourceUrl, currentFlag);
+            await ctx.editMessageCaption(newCaption, { parse_mode: 'HTML', ...getTranslationButtons() });
         } catch (e) {
-            console.error("Translation Error", e);
             await ctx.answerCbQuery("❌ Translation failed.");
         }
         return;
     }
 
-    // --- STANDARD LOGIC ---
+    // --- STANDARD DOWNLOAD LOGIC ---
     const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
     if (!url) return ctx.answerCbQuery("❌ Link expired.");
 
@@ -217,32 +242,46 @@ const handleCallback = async (ctx) => {
     if (url.includes('twitter') || url.includes('x.com')) platformName = 'Twitter';
     else if (url.includes('reddit')) platformName = 'Reddit';
 
+    // 1. RECOVER TITLE & FLAG FROM PREVIEW
+    // Format: "✅ 🇧🇩 *Title...*"
     let titleToUse = "Media Content";
+    let flagToUse = '🇧🇩';
+
     const msgText = ctx.callbackQuery.message.text;
     if (msgText) {
-        const firstLine = msgText.split('\n')[0];
-        titleToUse = firstLine.replace('✅ ', '');
+        const firstLine = msgText.split('\n')[0]; 
+        // Remove "✅ "
+        const content = firstLine.replace('✅ ', '');
+        
+        // Extract Flag (It's the first thing after checkmark now)
+        // We split by space. First item should be flag, rest is title.
+        const parts = content.split(' ');
+        if (parts.length > 0) {
+            // Check if first part looks like emoji (or just assume it is because we put it there)
+            // But sometimes title might start immediately if logic failed.
+            // Safe bet: Grab first part as flag, rejoin the rest.
+            const possibleFlag = parts[0];
+            // Simple emoji regex check or length check
+            if (/\p{Emoji}/u.test(possibleFlag)) {
+                flagToUse = possibleFlag;
+                titleToUse = parts.slice(1).join(' '); // Remainder is title
+            } else {
+                titleToUse = content; // Fallback
+            }
+        }
     }
 
-    const niceCaption = generateCaption(titleToUse, platformName, url);
+    const niceCaption = generateCaption(titleToUse, platformName, url, flagToUse);
     const userOriginalMsgId = ctx.callbackQuery.message.reply_to_message?.message_id;
 
     if (action === 'img') {
         await ctx.answerCbQuery("🚀 Sending...");
         try { 
-            await ctx.replyWithPhoto(url, { 
-                caption: niceCaption, 
-                parse_mode: 'HTML',
-                ...getTranslationButtons() // Add buttons to image too
-            });
+            await ctx.replyWithPhoto(url, { caption: niceCaption, parse_mode: 'HTML', ...getTranslationButtons() });
             if(userOriginalMsgId) await ctx.telegram.deleteMessage(ctx.chat.id, userOriginalMsgId).catch(()=>{});
         } 
         catch { 
-            await ctx.replyWithDocument(url, { 
-                caption: niceCaption, 
-                parse_mode: 'HTML',
-                ...getTranslationButtons() 
-            }); 
+            await ctx.replyWithDocument(url, { caption: niceCaption, parse_mode: 'HTML', ...getTranslationButtons() }); 
         }
         await ctx.deleteMessage();
     }
