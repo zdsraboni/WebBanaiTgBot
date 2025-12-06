@@ -15,7 +15,7 @@ module.exports = {
     // Identity
     UA_ANDROID: 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
     
-    // Regex (Updated for Spotify & SoundCloud)
+    // Regex
     URL_REGEX: /(https?:\/\/(?:www\.|old\.|mobile\.|m\.)?(?:reddit\.com|redd\.it|x\.com|twitter\.com|instagram\.com|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|spotify\.com|soundcloud\.com)\/[^\s]+)/i,
     
     // Reddit Mirrors
