@@ -1,7 +1,7 @@
 {
-  "name": "media-banai-bot",
+  "name": "media-banai-tg-bot",
   "version": "1.0.0",
-  "description": "Professional Reddit & Twitter Downloader",
+  "description": "Stable Media Downloader Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
