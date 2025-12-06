@@ -10,23 +10,28 @@ const twitterService = require('../services/twitter');
 
 // --- HELPER: GENERATE UI CAPTION ---
 const generateCaption = (text, platform, sourceUrl) => {
-    // 1. Telegram Limit Strategy
-    // Telegram caption limit is 1024 chars. We reserve ~100 chars for our UI tags.
-    // So we allow up to 900 characters of the actual text before cutting.
     const cleanText = text.length > 900 ? text.substring(0, 897) + '...' : text;
-    
-    // 2. Escape HTML (Security)
     const safeText = cleanText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-    // 3. The "Screenshot Style" UI
     return `🎬 <b>${platform} media</b> | <a href="${sourceUrl}">source</a>\n\n<blockquote>${safeText}</blockquote>`;
 };
 
 // --- SHARED DOWNLOAD FUNCTION ---
-const performDownload = async (ctx, url, isAudio, qualityId, messageIdToEdit, captionText) => {
+// Added 'userMsgId' to the arguments
+const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionText, userMsgId) => {
     try {
+        // 1. Try to Delete User's Message (The Link)
+        // Wrapped in try/catch because bots can't delete user messages in Private chats
+        if (userMsgId) {
+            try {
+                await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId);
+            } catch (err) {
+                // Silently fail if in Private chat or missing permissions
+            }
+        }
+
+        // 2. Update Bot Message to "Downloading"
         await ctx.telegram.editMessageText(
-            ctx.chat.id, messageIdToEdit, null, 
+            ctx.chat.id, botMsgId, null, 
             `⏳ *Downloading...*\n_Creating your masterpiece..._`, 
             { parse_mode: 'Markdown' }
         );
@@ -40,12 +45,12 @@ const performDownload = async (ctx, url, isAudio, qualityId, messageIdToEdit, ca
 
         const stats = fs.statSync(finalFile);
         if (stats.size > 49.5 * 1024 * 1024) {
-            await ctx.telegram.editMessageText(ctx.chat.id, messageIdToEdit, null, "⚠️ File > 50MB (Telegram Limit).");
+            await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, "⚠️ File > 50MB (Telegram Limit).");
             if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
             return;
         }
 
-        await ctx.telegram.editMessageText(ctx.chat.id, messageIdToEdit, null, "📤 *Uploading...*", { parse_mode: 'Markdown' });
+        await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, "📤 *Uploading...*", { parse_mode: 'Markdown' });
         
         if (isAudio) {
             await ctx.replyWithAudio({ source: finalFile }, { 
@@ -60,13 +65,14 @@ const performDownload = async (ctx, url, isAudio, qualityId, messageIdToEdit, ca
         }
 
         console.log(`✅ Upload Success: ${url}`);
-        await ctx.telegram.deleteMessage(ctx.chat.id, messageIdToEdit).catch(() => {});
+        
+        // Delete the "Uploading..." status message
+        await ctx.telegram.deleteMessage(ctx.chat.id, botMsgId).catch(() => {});
         if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
 
     } catch (e) {
         console.error(`Download Error: ${e.message}`);
-        await ctx.telegram.editMessageText(ctx.chat.id, messageIdToEdit, null, "❌ Error during download.");
-        // Cleanup
+        await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, "❌ Error during download.");
         const basePath = path.join(config.DOWNLOAD_DIR, `${Date.now()}`);
         if (fs.existsSync(`${basePath}.mp4`)) fs.unlinkSync(`${basePath}.mp4`);
     }
@@ -78,12 +84,10 @@ const handleMessage = async (ctx) => {
     const match = messageText.match(config.URL_REGEX);
     if (!match) return;
 
-    // 1. Check for Custom User Caption
-    // We remove the URL from the message. If anything is left, that's the custom caption.
     const inputUrl = match[0];
     const userCustomCaption = messageText.replace(inputUrl, '').trim();
 
-    console.log(`📩 New Request: ${inputUrl} | Custom Caption: ${userCustomCaption ? 'YES' : 'NO'}`);
+    console.log(`📩 New Request: ${inputUrl}`);
     const msg = await ctx.reply("🔍 *Analyzing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
@@ -102,23 +106,18 @@ const handleMessage = async (ctx) => {
         if (!media) throw new Error("Media not found");
 
         const safeUrl = media.url || media.source;
-
-        // 2. Decide which text to use (Custom OR Original)
         const finalTitleText = userCustomCaption.length > 0 ? userCustomCaption : media.title;
-        
-        // 3. Generate the UI
         const prettyCaption = generateCaption(finalTitleText, platformName, media.source);
 
         // --- AUTO-DOWNLOAD (Quality Check Failed) ---
         if (media.type === 'video' && (!media.formats || media.formats.length === 0)) {
             console.log("⚠️ No resolutions found. Auto-Downloading.");
-            return await performDownload(ctx, safeUrl, false, 'best', msg.message_id, prettyCaption);
+            // Pass ctx.message.message_id to delete it
+            return await performDownload(ctx, safeUrl, false, 'best', msg.message_id, prettyCaption, ctx.message.message_id);
         }
 
         // --- BUTTONS MENU ---
         const buttons = [];
-        
-        // Use the same final text for the "Found:" preview
         let previewText = `✅ *${finalTitleText.substring(0, 50)}...*`;
 
         if (media.type === 'gallery') {
@@ -141,12 +140,6 @@ const handleMessage = async (ctx) => {
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
 
-        // We store the "Custom Caption" implicitly by not passing it in callback data
-        // (Callback data is too small). 
-        // Instead, the Callback Handler below will re-extract it from the message text if possible,
-        // or we rely on the fact that the user sees the preview.
-        
-        // Ideally, we just show the preview here.
         await ctx.telegram.editMessageText(
             ctx.chat.id, msg.message_id, null,
             `${previewText}\n👤 Author: ${media.author}\nSource: [Link](${safeUrl})`,
@@ -170,33 +163,42 @@ const handleCallback = async (ctx) => {
     if (url.includes('twitter') || url.includes('x.com')) platformName = 'Twitter';
     else if (url.includes('reddit')) platformName = 'Reddit';
 
-    // RE-EXTRACT TITLE FROM MENU MESSAGE
-    // The menu message format is: "✅ *Title...*"
-    // We try to grab that title back to use in the caption
     let titleToUse = "Media Content";
     const msgText = ctx.callbackQuery.message.text;
     if (msgText) {
-        // Split by new line, take first line, remove "✅ "
         const firstLine = msgText.split('\n')[0];
         titleToUse = firstLine.replace('✅ ', '');
     }
 
     const niceCaption = generateCaption(titleToUse, platformName, url);
 
+    // Identify the Original User Message ID (The one the bot replied to)
+    const userOriginalMsgId = ctx.callbackQuery.message.reply_to_message?.message_id;
+
     if (action === 'img') {
         await ctx.answerCbQuery("🚀 Sending...");
-        try { await ctx.replyWithPhoto(url, { caption: niceCaption, parse_mode: 'HTML' }); } 
+        try { 
+            await ctx.replyWithPhoto(url, { caption: niceCaption, parse_mode: 'HTML' });
+            // Try delete user msg for Image too
+            if(userOriginalMsgId) await ctx.telegram.deleteMessage(ctx.chat.id, userOriginalMsgId).catch(()=>{});
+        } 
         catch { await ctx.replyWithDocument(url, { caption: niceCaption, parse_mode: 'HTML' }); }
-        await ctx.deleteMessage();
+        
+        await ctx.deleteMessage(); // Delete menu
     }
     else if (action === 'alb') {
         await ctx.answerCbQuery("🚀 Processing...");
+        // Album logic... (kept simple for now)
         let media = null;
         if (url.includes('x.com') || url.includes('twitter')) media = await twitterService.extract(url);
         else media = await redditService.extract(url);
 
         if (media?.type === 'gallery') {
+            // Delete menu
             await ctx.deleteMessage();
+            // Try delete user msg
+            if(userOriginalMsgId) await ctx.telegram.deleteMessage(ctx.chat.id, userOriginalMsgId).catch(()=>{});
+
             for (const item of media.items) {
                 try {
                     if(item.type==='video') await ctx.replyWithVideo(item.url);
@@ -207,7 +209,8 @@ const handleCallback = async (ctx) => {
     }
     else {
         await ctx.answerCbQuery("🚀 Downloading...");
-        await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, niceCaption);
+        // Pass userOriginalMsgId to the downloader to delete it
+        await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, niceCaption, userOriginalMsgId);
     }
 };
 
