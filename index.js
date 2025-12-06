@@ -4,13 +4,15 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 
-// Import Version from package.json
+// Import Version
 const { version } = require('./package.json');
 
 // Import Modules
 const config = require('./src/config/settings');
 const logger = require('./src/utils/logger');
 const downloader = require('./src/utils/downloader');
+
+// Import Services (ONLY Reddit & Twitter)
 const redditService = require('./src/services/reddit');
 const twitterService = require('./src/services/twitter');
 
@@ -32,7 +34,7 @@ const resolveRedirect = async (url) => {
 };
 
 // --- HANDLER ---
-bot.start((ctx) => ctx.reply(`👋 **Media Banai Bot v${version}**\n\nStable Release.\nSend Reddit or Twitter links.`));
+bot.start((ctx) => ctx.reply(`👋 **Media Banai Bot v${version}**\n\nStable Mode.\nSend Reddit or Twitter links.`));
 
 bot.on('text', async (ctx) => {
     const match = ctx.message.text.match(config.URL_REGEX);
@@ -46,6 +48,7 @@ bot.on('text', async (ctx) => {
         const fullUrl = await resolveRedirect(inputUrl);
         let media = null;
 
+        // Route ONLY to Reddit or Twitter
         if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
             media = await twitterService.extract(fullUrl);
         } else {
@@ -65,14 +68,14 @@ bot.on('text', async (ctx) => {
             buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
         } 
         else if (media.type === 'video') {
-            if (media.formats?.length > 0) {
-                media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height).slice(0, 5).forEach(f => {
+            if (media.formats && media.formats.length > 0) {
+                const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height).slice(0, 5);
+                formats.forEach(f => {
                     if(!buttons.some(b => b[0].text.includes(f.height))) 
                         buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]);
                 });
-            } else {
-                buttons.push([Markup.button.callback("📹 Download Video", `vid|best`)]);
             }
+            if (buttons.length === 0) buttons.push([Markup.button.callback("📹 Download Video", `vid|best`)]);
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
 
@@ -128,17 +131,16 @@ bot.on('callback_query', async (ctx) => {
                 if (isAudio) await ctx.replyWithAudio({ source: finalFile });
                 else await ctx.replyWithVideo({ source: finalFile });
                 await ctx.deleteMessage();
-                console.log(`✅ Uploaded: ${url}`);
+                console.log(`✅ Uploaded`);
             }
         } catch (e) { console.error(e); await ctx.editMessageText("❌ Error"); } 
         finally { if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile); }
     }
 });
 
-// --- LIVE TAIL PAGE ---
+// --- SERVER ---
 app.get('/api/logs', (req, res) => res.json(logger.getLogs()));
-// Server now displays the version
-app.get('/', (req, res) => res.send(`<html><head><meta http-equiv="refresh" content="2"><title>Media Banai v${version}</title></head><body style="background:#0d1117;color:#c9d1d9;font-family:monospace;padding:20px"><h1>🚀 Media Banai Bot v${version}</h1><div id="logs">Loading...</div><script>fetch('/api/logs').then(r=>r.json()).then(d=>document.getElementById('logs').innerHTML=d.map(l=>\`<div style="border-bottom:1px solid #30363d;padding:2px"><span style="color:#8b949e">[\${l.time}]</span> <span style="color:\${l.type==='ERROR'?'#f85149':'#3fb950'}">\${l.type}</span> \${l.message}</div>\`).join(''))</script></body></html>`));
+app.get('/', (req, res) => res.send(`<html><head><meta http-equiv="refresh" content="2"><title>Media Banai v${version}</title></head><body style="background:#0d1117;color:#c9d1d9;font-family:monospace;padding:20px"><h1>🚀 Media Banai Bot v${version}</h1><div id="logs">Loading...</div><script>fetch('/api/logs').then(r=>r.json()).then(d=>document.getElementById('logs').innerHTML=d.map(l=>\`<div>[\${l.time}] \${l.message}</div>\`).join(''))</script></body></html>`));
 
 if (process.env.NODE_ENV === 'production') {
     app.use(bot.webhookCallback('/bot'));
