@@ -2,6 +2,7 @@ const { Markup } = require('telegraf');
 const fs = require('fs');
 const path = require('path');
 const config = require('../config/settings');
+const { translate } = require('google-translate-api-x');
 
 const { resolveRedirect } = require('./helpers'); 
 const downloader = require('./downloader');
@@ -10,26 +11,23 @@ const twitterService = require('../services/twitter');
 
 // --- HELPER: GENERATE UI CAPTION ---
 const generateCaption = (text, platform, sourceUrl) => {
-    const cleanText = text.length > 900 ? text.substring(0, 897) + '...' : text;
+    // 1. Clean Text
+    const cleanText = text ? (text.length > 900 ? text.substring(0, 897) + '...' : text) : "Media Content";
+    // 2. Escape HTML
     const safeText = cleanText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    // 3. UI Template
     return `🎬 <b>${platform} media</b> | <a href="${sourceUrl}">source</a>\n\n<blockquote>${safeText}</blockquote>`;
 };
 
 // --- SHARED DOWNLOAD FUNCTION ---
-// Added 'userMsgId' to the arguments
 const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionText, userMsgId) => {
     try {
-        // 1. Try to Delete User's Message (The Link)
-        // Wrapped in try/catch because bots can't delete user messages in Private chats
+        // Delete User Message if possible
         if (userMsgId) {
-            try {
-                await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId);
-            } catch (err) {
-                // Silently fail if in Private chat or missing permissions
-            }
+            try { await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId); } catch (err) {}
         }
 
-        // 2. Update Bot Message to "Downloading"
         await ctx.telegram.editMessageText(
             ctx.chat.id, botMsgId, null, 
             `⏳ *Downloading...*\n_Creating your masterpiece..._`, 
@@ -52,21 +50,22 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
 
         await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, "📤 *Uploading...*", { parse_mode: 'Markdown' });
         
+        // --- ADD TRANSLATE BUTTON HERE ---
+        const extraOptions = { 
+            caption: captionText || '🚀 Downloaded via Media Banai',
+            parse_mode: 'HTML',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('🔠 Translate to English', 'trans')]
+            ])
+        };
+
         if (isAudio) {
-            await ctx.replyWithAudio({ source: finalFile }, { 
-                caption: captionText || '🎵 Audio extracted by Media Banai',
-                parse_mode: 'HTML' 
-            });
+            await ctx.replyWithAudio({ source: finalFile }, extraOptions);
         } else {
-            await ctx.replyWithVideo({ source: finalFile }, { 
-                caption: captionText || '🚀 Downloaded via Media Banai',
-                parse_mode: 'HTML' 
-            });
+            await ctx.replyWithVideo({ source: finalFile }, extraOptions);
         }
 
         console.log(`✅ Upload Success: ${url}`);
-        
-        // Delete the "Uploading..." status message
         await ctx.telegram.deleteMessage(ctx.chat.id, botMsgId).catch(() => {});
         if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
 
@@ -107,12 +106,13 @@ const handleMessage = async (ctx) => {
 
         const safeUrl = media.url || media.source;
         const finalTitleText = userCustomCaption.length > 0 ? userCustomCaption : media.title;
+        
+        // Generate UI (No translation yet, button will handle it)
         const prettyCaption = generateCaption(finalTitleText, platformName, media.source);
 
-        // --- AUTO-DOWNLOAD (Quality Check Failed) ---
+        // --- AUTO-DOWNLOAD ---
         if (media.type === 'video' && (!media.formats || media.formats.length === 0)) {
             console.log("⚠️ No resolutions found. Auto-Downloading.");
-            // Pass ctx.message.message_id to delete it
             return await performDownload(ctx, safeUrl, false, 'best', msg.message_id, prettyCaption, ctx.message.message_id);
         }
 
@@ -154,9 +154,57 @@ const handleMessage = async (ctx) => {
 
 // --- CALLBACK HANDLER ---
 const handleCallback = async (ctx) => {
-    const [action, id] = ctx.callbackQuery.data.split('|');
-    const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
+    const data = ctx.callbackQuery.data;
+    const [action, id] = data.split('|');
     
+    // --- TRANSLATE BUTTON LOGIC ---
+    if (action === 'trans') {
+        const messageCaption = ctx.callbackQuery.message.caption;
+        const entities = ctx.callbackQuery.message.caption_entities;
+        
+        if (!messageCaption) return ctx.answerCbQuery("No text to translate.");
+
+        await ctx.answerCbQuery("🔄 Translating...");
+
+        // 1. Recover Source URL from entities
+        const linkEntity = entities?.find(e => e.type === 'text_link');
+        const sourceUrl = linkEntity ? linkEntity.url : "https://google.com";
+        
+        // 2. Recover Platform Name (Simple Check)
+        let platform = 'Social';
+        if (messageCaption.toLowerCase().includes('twitter')) platform = 'Twitter';
+        else if (messageCaption.toLowerCase().includes('reddit')) platform = 'Reddit';
+
+        // 3. Extract the actual content (Remove Header)
+        // Header is roughly "🎬 Platform media | source"
+        // We assume the content starts after the first double newline or is the bulk of text
+        // Simplest way: Split by newline, take everything from index 2 onwards
+        const lines = messageCaption.split('\n');
+        let contentToTranslate = messageCaption;
+        
+        if (lines.length > 2) {
+            contentToTranslate = lines.slice(2).join('\n').trim();
+        }
+
+        try {
+            // 4. Translate
+            const res = await translate(contentToTranslate, { to: 'en', autoCorrect: true });
+            
+            // 5. Update Caption
+            const newCaption = generateCaption(res.text, platform, sourceUrl);
+            
+            // Edit the caption and REMOVE the translate button
+            await ctx.editMessageCaption(newCaption, { parse_mode: 'HTML' });
+            
+        } catch (e) {
+            console.error("Translation Error", e);
+            await ctx.answerCbQuery("❌ Translation failed.");
+        }
+        return;
+    }
+
+    // --- STANDARD DOWNLOAD LOGIC ---
+    const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
     if (!url) return ctx.answerCbQuery("❌ Link expired.");
 
     let platformName = 'Social';
@@ -171,34 +219,36 @@ const handleCallback = async (ctx) => {
     }
 
     const niceCaption = generateCaption(titleToUse, platformName, url);
-
-    // Identify the Original User Message ID (The one the bot replied to)
     const userOriginalMsgId = ctx.callbackQuery.message.reply_to_message?.message_id;
 
     if (action === 'img') {
         await ctx.answerCbQuery("🚀 Sending...");
         try { 
-            await ctx.replyWithPhoto(url, { caption: niceCaption, parse_mode: 'HTML' });
-            // Try delete user msg for Image too
+            await ctx.replyWithPhoto(url, { 
+                caption: niceCaption, 
+                parse_mode: 'HTML',
+                ...Markup.inlineKeyboard([[Markup.button.callback('🔠 Translate to English', 'trans')]])
+            });
             if(userOriginalMsgId) await ctx.telegram.deleteMessage(ctx.chat.id, userOriginalMsgId).catch(()=>{});
         } 
-        catch { await ctx.replyWithDocument(url, { caption: niceCaption, parse_mode: 'HTML' }); }
-        
-        await ctx.deleteMessage(); // Delete menu
+        catch { 
+            await ctx.replyWithDocument(url, { 
+                caption: niceCaption, 
+                parse_mode: 'HTML',
+                ...Markup.inlineKeyboard([[Markup.button.callback('🔠 Translate to English', 'trans')]])
+            }); 
+        }
+        await ctx.deleteMessage();
     }
     else if (action === 'alb') {
         await ctx.answerCbQuery("🚀 Processing...");
-        // Album logic... (kept simple for now)
         let media = null;
         if (url.includes('x.com') || url.includes('twitter')) media = await twitterService.extract(url);
         else media = await redditService.extract(url);
 
         if (media?.type === 'gallery') {
-            // Delete menu
             await ctx.deleteMessage();
-            // Try delete user msg
             if(userOriginalMsgId) await ctx.telegram.deleteMessage(ctx.chat.id, userOriginalMsgId).catch(()=>{});
-
             for (const item of media.items) {
                 try {
                     if(item.type==='video') await ctx.replyWithVideo(item.url);
@@ -209,7 +259,6 @@ const handleCallback = async (ctx) => {
     }
     else {
         await ctx.answerCbQuery("🚀 Downloading...");
-        // Pass userOriginalMsgId to the downloader to delete it
         await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, niceCaption, userOriginalMsgId);
     }
 };
