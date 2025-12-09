@@ -7,59 +7,72 @@ const handlers = require('../utils/handlers');
 const setupServer = (bot) => {
     const app = express();
 
-    // ✅ ENABLE PARSING (So we can read POST body data too)
+    // Enable Body Parsing (For POST requests from IFTTT/Shortcuts)
     app.use(express.json());
     app.use(express.urlencoded({ extended: true }));
 
     // 1. Logs
     app.get('/api/logs', (req, res) => res.json(logger.getLogs()));
 
-    // 2. SUPER DEBUG WEBHOOK (Accepts GET and POST)
+    // 2. PRODUCTION AUTOMATION WEBHOOK
     app.all('/api/trigger', async (req, res) => {
-        const method = req.method; // GET or POST
-        const query = req.query;   // Data in URL (?url=...)
-        const body = req.body;     // Data in Body (JSON)
+        const query = req.query;
+        const body = req.body;
+        
+        // Get data from either URL (?secret=...) or Body (JSON)
+        const secret = query.secret || body.secret;
+        const url = query.url || body.url;
 
-        console.log(`🔔 Webhook Hit via ${method}`);
-        console.log("Query:", JSON.stringify(query));
-        console.log("Body:", JSON.stringify(body));
+        // Security Check
+        if (String(secret) !== String(config.ADMIN_ID)) {
+            return res.status(403).send('❌ Access Denied');
+        }
 
-        // Reply to IFTTT immediately
-        res.status(200).send('✅ Debug Data Received');
+        if (!url) return res.status(400).send('❌ No URL provided');
+
+        // ✅ Respond to IFTTT immediately (Prevents Timeout errors)
+        res.status(200).send('✅ Processing started...');
 
         try {
             const userId = config.ADMIN_ID; 
 
-            // BUILD THE REPORT
-            let msg = `🕵️ <b>IFTTT Data Dump</b>\n`;
-            msg += `-----------------------------\n`;
-            msg += `<b>Method:</b> ${method}\n`;
-            msg += `<b>Secret Received:</b> <code>${query.secret || body.secret || 'NONE'}</code>\n`;
-            msg += `<b>My Secret:</b> <code>${config.ADMIN_ID}</code>\n\n`;
+            console.log(`🤖 Auto-Download Triggered for: ${url}`);
 
-            // SHOW QUERY PARAMS (What's in the URL)
-            if (Object.keys(query).length > 0) {
-                msg += `<b>📥 URL Parameters:</b>\n<pre>${JSON.stringify(query, null, 2)}</pre>\n\n`;
-            }
+            // 1. Send a quick status update to Telegram
+            // (Optional: You can remove this if you want it completely silent)
+            await bot.telegram.sendMessage(userId, `🔄 <b>Auto-Download Started...</b>`, { parse_mode: 'HTML' });
 
-            // SHOW BODY DATA (If IFTTT sent JSON)
-            if (Object.keys(body).length > 0) {
-                msg += `<b>📦 Body/JSON Data:</b>\n<pre>${JSON.stringify(body, null, 2)}</pre>\n`;
-            }
+            // 2. Create a "Ghost Context"
+            // This tricks the bot into thinking YOU sent the message manually.
+            const mockCtx = {
+                // User Info (Pretend it's you)
+                from: { id: userId, first_name: 'Admin', is_bot: false },
+                chat: { id: userId, type: 'private' },
+                
+                // The Message (The Link from IFTTT)
+                message: { 
+                    text: url, 
+                    message_id: 0, 
+                    from: { id: userId }
+                },
 
-            // ANALYSIS
-            const receivedUrl = query.url || body.url;
-            if (!receivedUrl) {
-                msg += `❌ <b>ERROR:</b> No 'url' found in data!`;
-            } else {
-                msg += `✅ <b>URL Found:</b> ${receivedUrl}`;
-            }
+                // Map Bot Functions
+                reply: (text, extra) => bot.telegram.sendMessage(userId, text, extra),
+                telegram: bot.telegram,
+                
+                // Mock "Edit Message" (Since there's no real previous message to edit, we send new ones or ignore)
+                // We map editMessageText to sendMessage for status updates, or just ignore to keep chat clean.
+                // Let's map it to sendMessage so you see "Analyzing" -> "Downloading" updates.
+                // Note: Real handleMessage expects a message_id to edit.
+                // We will let handleMessage send the first "Searching" reply, then it will use that ID.
+            };
 
-            // Send to Telegram
-            await bot.telegram.sendMessage(userId, msg, { parse_mode: 'HTML' });
+            // 3. Pass to the Main Logic
+            // This will run Regex, Clean the Link, Check Insta/TikTok/Twitter, and Download.
+            await handlers.handleMessage(mockCtx);
 
         } catch (e) {
-            console.error("Debug Error:", e);
+            console.error("Webhook Execution Error:", e);
         }
     });
 
