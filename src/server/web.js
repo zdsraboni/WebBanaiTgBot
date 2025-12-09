@@ -10,7 +10,7 @@ const setupServer = (bot) => {
     // 1. Logs
     app.get('/api/logs', (req, res) => res.json(logger.getLogs()));
 
-    // 2. SECRET WEBHOOK (Fixed with Link Extraction)
+    // 2. IFTTT / AUTOMATION WEBHOOK
     app.get('/api/trigger', async (req, res) => {
         const { secret, url } = req.query;
 
@@ -20,35 +20,45 @@ const setupServer = (bot) => {
         }
         if (!url) return res.status(400).send('❌ No URL provided');
 
-        // ✅ FIX: Extract the actual link from the text
-        // If user shares "Check this https://x.com/...", we grab only the URL
-        const match = url.match(config.URL_REGEX);
-        const cleanUrl = match ? match[0] : url; // Fallback to original if no regex match
-
-        // Respond to phone immediately
-        res.send(`✅ Processing: ${cleanUrl}`);
+        // ✅ CRITICAL FIX FOR TIMEOUT: 
+        // We tell IFTTT "Success" immediately (Fire and Forget).
+        // This prevents IFTTT from showing "Error/Timeout" while the video downloads.
+        res.status(200).send('✅ Signal Received. Processing in background...');
 
         try {
-            const userId = config.ADMIN_ID;
-            
-            // 1. Send "Thinking" message
-            const msg = await bot.telegram.sendMessage(userId, `🔄 <b>Auto-Download...</b>\n🔗 ${cleanUrl}`, { parse_mode: 'HTML' });
+            const userId = config.ADMIN_ID; 
 
-            // 2. Mock Context
-            const fakeCtx = {
-                chat: { id: userId },
+            // 3. THE "GHOST USER" SIMULATION
+            // We create a fake "Context" that looks exactly like a real Telegram message.
+            const mockCtx = {
+                // User Info
+                from: { id: userId, first_name: 'Admin', is_bot: false },
+                chat: { id: userId, type: 'private' },
+                
+                // The Message Content (From IFTTT)
+                message: { 
+                    text: url, 
+                    message_id: 0, // Virtual ID
+                    from: { id: userId }
+                },
+
+                // Functions the bot needs to reply
+                reply: (text, extra) => bot.telegram.sendMessage(userId, text, extra),
                 telegram: bot.telegram,
-                replyWithAudio: (doc, opts) => bot.telegram.sendAudio(userId, doc.source, opts),
-                replyWithVideo: (doc, opts) => bot.telegram.sendVideo(userId, doc.source, opts),
-                telegram: {
-                    editMessageText: (chatId, msgId, inlineMsgId, text, extra) => 
-                        bot.telegram.editMessageText(chatId, msgId, inlineMsgId, text, extra),
-                    deleteMessage: (chatId, msgId) => bot.telegram.deleteMessage(chatId, msgId)
-                }
+                
+                // Allow the bot to "Answer" callbacks if needed (mocked)
+                answerCbQuery: () => Promise.resolve(),
+                replyWithPhoto: (photo, extra) => bot.telegram.sendPhoto(userId, photo, extra),
+                replyWithVideo: (video, extra) => bot.telegram.sendVideo(userId, video, extra),
+                replyWithAudio: (audio, extra) => bot.telegram.sendAudio(userId, audio, extra),
+                replyWithDocument: (doc, extra) => bot.telegram.sendDocument(userId, doc, extra)
             };
 
-            // 3. Download using the CLEAN URL
-            await handlers.performDownload(fakeCtx, cleanUrl, false, 'best', msg.message_id, `🤖 <b>Auto-Captured</b>\nSource: ${cleanUrl}`, null);
+            // ✅ PASS TO MAIN HANDLER
+            // The bot will treat this exactly like you typed the link in the chat.
+            // It will run regex checks, find the media, and download it.
+            console.log(`🤖 Webhook Triggered for: ${url}`);
+            await handlers.handleMessage(mockCtx);
 
         } catch (e) {
             console.error("Webhook Error:", e);
