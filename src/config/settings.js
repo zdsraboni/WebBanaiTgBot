@@ -4,7 +4,7 @@ const path = require('path');
 module.exports = {
     // API & Server Keys
     BOT_TOKEN: process.env.BOT_TOKEN,
-    APP_URL: process.env.RENDER_EXTERNAL_URL,
+    APP_URL: 'https://zihad69-webbanaibot.hf.space',
     PORT: process.env.PORT || 3000,
     ADMIN_ID: process.env.ADMIN_ID || 123456789,
     
