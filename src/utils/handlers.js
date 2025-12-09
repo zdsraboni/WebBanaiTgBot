@@ -30,86 +30,28 @@ const getTranslationButtons = () => {
     ]]);
 };
 
-// --- START & HELP HANDLERS (PROFESSIONAL UI) ---
+// --- START & HELP ---
 const handleStart = async (ctx) => {
-    if (ctx.from) db.addUser(ctx.from.id);
-    
-    const text = `
-👋 <b>Welcome to Media Banai!</b>
-
-I am a professional media downloader bot. 
-I can download high-quality videos and images from:
-• 🐦 <b>Twitter / X</b>
-• 👽 <b>Reddit</b>
-
-<b>🚀 Features:</b>
-• 🎬 Auto-Download (Highest Quality)
-• 🗣 Smart Translation (Eng/Ban)
-• 👻 Ghost Mentions (Group Nicknames)
-• 📝 Custom Captions & Flags
-
-<i>Just send me a link to get started!</i>
-    `.trim();
-
-    const buttons = Markup.inlineKeyboard([
-        [Markup.button.callback('📚 How to Use', 'help_msg'), Markup.button.callback('📊 Bot Stats', 'stats_msg')],
-        [Markup.button.url('📣 Updates Channel', 'https://t.me/MediaBanaiUpdates')] // Replace with your channel or remove
-    ]);
-
-    // If called via callback (Back button), edit message. Else send new.
-    if (ctx.callbackQuery) {
-        await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
-    } else {
-        await ctx.reply(text, { parse_mode: 'HTML', ...buttons });
-    }
+    db.addUser(ctx);
+    const text = `👋 <b>Welcome to Media Banai!</b>\nI can download from Twitter/X and Reddit.\n\n<b>Features:</b>\n• Auto-Download\n• Ghost Mentions (Groups)\n• Translation`;
+    const buttons = Markup.inlineKeyboard([[Markup.button.callback('📚 Help', 'help_msg'), Markup.button.callback('📊 Stats', 'stats_msg')]]);
+    if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
+    else await ctx.reply(text, { parse_mode: 'HTML', ...buttons });
 };
 
 const handleHelp = async (ctx) => {
-    const text = `
-📚 <b>Media Banai Help Guide</b>
-
-<b>1. 📥 Downloading Media</b>
-Simply send any valid link from Twitter(X) or Reddit.
-• I will analyze it and provide download buttons.
-• If "Quality Check" fails, I auto-download the best version.
-
-<b>2. 📝 Custom Captions</b>
-• Write text after the link to set a custom caption.
-• <i>Ex:</i> <code>https://x.com/post Wow this is cool!</code>
-• Add country code (us, bd, in) before link for flags.
-• <i>Ex:</i> <code>bd https://x.com/post</code>
-
-<b>3. 👻 Ghost Mentions (Groups)</b>
-<i>(Reply to a user in a group)</i>
-• <code>/setnick bro</code> - Saves "bro" for that user.
-• Type <b>bro</b> - Bot deletes text & tags user.
-• <code>/delnick bro</code> - Deletes nickname.
-
-<b>4. 🗣 Translation</b>
-• Use the 🇺🇸/🇧🇩 buttons below media to translate captions.
-    `.trim();
-
-    const buttons = Markup.inlineKeyboard([
-        [Markup.button.callback('⬅️ Back to Menu', 'start_msg')]
-    ]);
-
-    if (ctx.callbackQuery) {
-        await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
-    } else {
-        await ctx.reply(text, { parse_mode: 'HTML' });
-    }
+    const text = `📚 <b>Help Guide</b>\n\n<b>1. Downloads:</b> Send any X/Reddit link.\n<b>2. Custom Caption:</b> Add text after link.\n<b>3. Ghost Mention:</b> Reply to user & type <code>/setnick name</code>. Then type name to tag.`;
+    const buttons = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'start_msg')]]);
+    if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
+    else await ctx.reply(text, { parse_mode: 'HTML' });
 };
 
-// --- SHARED DOWNLOAD FUNCTION ---
+// --- DOWNLOADER ---
 const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionText, userMsgId) => {
     try {
         if (userMsgId) { try { await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId); } catch (err) {} }
 
-        await ctx.telegram.editMessageText(
-            ctx.chat.id, botMsgId, null, 
-            `⏳ *Downloading...*\n_Creating your masterpiece..._`, 
-            { parse_mode: 'Markdown' }
-        );
+        await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, `⏳ *Downloading...*`, { parse_mode: 'Markdown' });
 
         const timestamp = Date.now();
         const basePath = path.join(config.DOWNLOAD_DIR, `${timestamp}`);
@@ -127,32 +69,30 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
 
         await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, "📤 *Uploading...*", { parse_mode: 'Markdown' });
         
-        const extraOptions = { 
-            caption: captionText || '🚀 Downloaded via Media Banai',
-            parse_mode: 'HTML',
-            ...getTranslationButtons()
-        };
+        const extraOptions = { caption: captionText || '🚀 Media Banai', parse_mode: 'HTML', ...getTranslationButtons() };
 
         if (isAudio) await ctx.replyWithAudio({ source: finalFile }, extraOptions);
         else await ctx.replyWithVideo({ source: finalFile }, extraOptions);
 
-        db.incrementDownloads(); // Track stats
+        // ✅ NEW: Increment stats for this specific user
+        const userId = ctx.callbackQuery ? ctx.callbackQuery.from.id : (ctx.message ? ctx.message.from.id : null);
+        db.incrementDownloads(userId);
 
-        console.log(`✅ Upload Success: ${url}`);
+        console.log(`✅ Upload Success`);
         await ctx.telegram.deleteMessage(ctx.chat.id, botMsgId).catch(() => {});
         if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
 
     } catch (e) {
         console.error(`Download Error: ${e.message}`);
-        await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, "❌ Error during download.");
+        await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, "❌ Error.");
         const basePath = path.join(config.DOWNLOAD_DIR, `${Date.now()}`);
         if (fs.existsSync(`${basePath}.mp4`)) fs.unlinkSync(`${basePath}.mp4`);
     }
 };
 
-// --- MESSAGE HANDLER ---
+// --- MAIN MESSAGE HANDLER ---
 const handleMessage = async (ctx) => {
-    if (ctx.from && ctx.from.id) db.addUser(ctx.from.id);
+    db.addUser(ctx); // Track User
 
     const messageText = ctx.message.text;
     if (!messageText) return; 
@@ -166,12 +106,9 @@ const handleMessage = async (ctx) => {
     const postText = parts[1].trim(); 
 
     let flagEmoji = '🇧🇩';
-    if (preText.length === 2 && /^[a-zA-Z]+$/.test(preText)) {
-        flagEmoji = getFlagEmoji(preText);
-    }
+    if (preText.length === 2 && /^[a-zA-Z]+$/.test(preText)) flagEmoji = getFlagEmoji(preText);
 
     const userCustomCaption = postText; 
-    console.log(`📩 Request: ${inputUrl} | Flag: ${flagEmoji}`);
     const msg = await ctx.reply("🔍 *Analyzing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
@@ -194,59 +131,46 @@ const handleMessage = async (ctx) => {
         const prettyCaption = generateCaption(finalTitleText, platformName, media.source, flagEmoji);
 
         if (media.type === 'video' && (!media.formats || media.formats.length === 0)) {
-            console.log("⚠️ No resolutions found. Auto-Downloading.");
             return await performDownload(ctx, safeUrl, false, 'best', msg.message_id, prettyCaption, ctx.message.message_id);
         }
 
         const buttons = [];
         let previewText = `✅ ${flagEmoji} *${finalTitleText.substring(0, 50)}...*`;
 
-        if (media.type === 'gallery') {
-            previewText += `\n📚 **Gallery:** ${media.items.length} items`;
-            buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
-        } 
-        else if (media.type === 'image') {
-            previewText += `\n🖼 **Image Detected**`;
-            buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
-        } 
+        if (media.type === 'gallery') buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
+        else if (media.type === 'image') buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
         else if (media.type === 'video') {
             const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height);
             const seen = new Set();
             formats.slice(0, 5).forEach(f => {
-                if(!seen.has(f.height)) {
-                    seen.add(f.height);
-                    buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]);
-                }
+                if(!seen.has(f.height)) { seen.add(f.height); buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]); }
             });
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
 
-        await ctx.telegram.editMessageText(
-            ctx.chat.id, msg.message_id, null,
-            `${previewText}\n👤 Author: ${media.author}\nSource: [Link](${safeUrl})`,
-            { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
-        );
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, `${previewText}\n👤 Author: ${media.author}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
 
     } catch (e) {
-        console.error(`Processing Error: ${e.message}`);
         await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed. Content unavailable.");
     }
 };
 
-// --- GROUP HANDLER ---
+// --- GHOST MENTION HANDLER ---
 const handleGroupMessage = async (ctx, next) => {
     const messageText = ctx.message.text;
-    
+
+    // 1. SET NICKNAME
     if (messageText && messageText.startsWith('/setnick')) {
         const parts = messageText.split(' ');
-        if (parts.length < 2) return ctx.reply("⚠️ Usage: Reply to a user and type: /setnick <name>");
+        if (parts.length < 2) return ctx.reply("⚠️ Usage: Reply + /setnick <name>");
         const nickName = parts[1].toLowerCase();
-        if (!ctx.message.reply_to_message) return ctx.reply("⚠️ You must reply to the user you want to nickname.");
+        if (!ctx.message.reply_to_message) return ctx.reply("⚠️ Reply to a user first.");
         
         await db.setNickname(ctx.chat.id, nickName, ctx.message.reply_to_message.from.id);
         return ctx.reply(`✅ Nickname set! Type <b>${nickName}</b> to mention user.`, { parse_mode: 'HTML' });
     }
 
+    // 2. DELETE NICKNAME
     if (messageText && messageText.startsWith('/delnick')) {
         const parts = messageText.split(' ');
         if (parts.length < 2) return;
@@ -254,58 +178,42 @@ const handleGroupMessage = async (ctx, next) => {
         return ctx.reply(`🗑 Nickname '${parts[1]}' deleted.`);
     }
 
+    // 3. TRIGGER MENTION
     if (messageText) {
         const cleanText = messageText.trim().toLowerCase();
         const nickEntry = await db.getNickname(ctx.chat.id, cleanText);
+        
         if (nickEntry) {
-            try { await ctx.deleteMessage(); } catch (e) {}
+            // Found a nickname!
+            try { 
+                await ctx.deleteMessage(); // Try to delete user message
+            } catch (e) {
+                // If bot is not admin, it fails. We ignore error and send mention anyway.
+                console.log("⚠️ Could not delete message (Bot not admin?)");
+            }
+            
             await ctx.reply(`👋 <b>${ctx.from.first_name}</b> mentioned <a href="tg://user?id=${nickEntry.targetId}">User</a>`, { parse_mode: 'HTML' });
-            return; 
+            return; // Stop here, do not process as a link
         }
     }
     return next();
 };
 
-// --- ADMIN HANDLER ---
-const handleAdmin = async (ctx) => {
-    if (String(ctx.from.id) !== String(config.ADMIN_ID)) return;
-    const command = ctx.message.text.split(' ')[0];
-
-    if (command === '/stats') {
-        const stats = await db.getStats();
-        return ctx.reply(`📊 <b>Stats</b>\n👤 Users: ${stats.users}\n⬇️ Downloads: ${stats.downloads}`, { parse_mode: 'HTML' });
-    }
-    if (command === '/broadcast') {
-        const message = ctx.message.text.replace('/broadcast', '').trim();
-        if (!message) return ctx.reply("⚠️ Usage: /broadcast [Message]");
-        const users = await db.getAllUsers();
-        await ctx.reply(`📢 Sending to ${users.length} users...`);
-        let s = 0;
-        for (const u of users) { try { await ctx.telegram.sendMessage(u, message); s++; } catch(e){} }
-        return ctx.reply(`✅ Sent to ${s} users.`);
-    }
-};
-
 // --- CALLBACK HANDLER ---
 const handleCallback = async (ctx) => {
-    if (ctx.from && ctx.from.id) db.addUser(ctx.from.id);
+    db.addUser(ctx);
     const data = ctx.callbackQuery.data;
     const [action, id] = data.split('|');
     
-    // UI NAVIGATION
     if (action === 'help_msg') return handleHelp(ctx);
     if (action === 'start_msg') return handleStart(ctx);
-    if (action === 'stats_msg') {
-        const stats = await db.getStats();
-        return ctx.answerCbQuery(`📊 Users: ${stats.users} | Downloads: ${stats.downloads}`, { show_alert: true });
-    }
+    if (action === 'stats_msg') return ctx.answerCbQuery("Use /stats command.", { show_alert: true });
 
-    // TRANSLATE
     if (action === 'trans') {
         const targetLang = id; 
         const messageCaption = ctx.callbackQuery.message.caption;
         if (!messageCaption) return ctx.answerCbQuery("No text.");
-        await ctx.answerCbQuery(targetLang === 'bn' ? "🇧🇩 Translating..." : "🇺🇸 Translating...");
+        await ctx.answerCbQuery("Translating...");
 
         let currentFlag = '🇧🇩'; 
         const sourceLine = messageCaption.split('\n')[0]; 
@@ -316,81 +224,33 @@ const handleCallback = async (ctx) => {
         const linkEntity = entities?.find(e => e.type === 'text_link');
         const sourceUrl = linkEntity ? linkEntity.url : "https://google.com";
         
-        let platform = 'Social';
-        if (messageCaption.toLowerCase().includes('twitter')) platform = 'Twitter';
-        else if (messageCaption.toLowerCase().includes('reddit')) platform = 'Reddit';
-
         const lines = messageCaption.split('\n');
-        let contentToTranslate = messageCaption;
-        if (lines.length > 2) contentToTranslate = lines.slice(2).join('\n').trim();
+        let contentToTranslate = lines.length > 2 ? lines.slice(2).join('\n').trim() : messageCaption;
 
         try {
             const res = await translate(contentToTranslate, { to: targetLang, autoCorrect: true });
-            const newCaption = generateCaption(res.text, platform, sourceUrl, currentFlag);
+            const newCaption = generateCaption(res.text, 'Social', sourceUrl, currentFlag);
             await ctx.editMessageCaption(newCaption, { parse_mode: 'HTML', ...getTranslationButtons() });
-        } catch (e) {
-            await ctx.answerCbQuery("❌ Translation failed.");
-        }
+        } catch (e) { await ctx.answerCbQuery("❌ Translation failed."); }
         return;
     }
 
-    // DOWNLOAD
     const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
     if (!url) return ctx.answerCbQuery("❌ Link expired.");
 
-    let platformName = 'Social';
-    if (url.includes('twitter') || url.includes('x.com')) platformName = 'Twitter';
-    else if (url.includes('reddit')) platformName = 'Reddit';
-
-    let titleToUse = "Media Content";
-    let flagToUse = '🇧🇩';
-    const msgText = ctx.callbackQuery.message.text;
-    if (msgText) {
-        const firstLine = msgText.split('\n')[0]; 
-        const content = firstLine.replace('✅ ', '');
-        const parts = content.split(' ');
-        if (parts.length > 0 && /\p{Emoji}/u.test(parts[0])) {
-            flagToUse = parts[0];
-            titleToUse = parts.slice(1).join(' '); 
-        } else {
-            titleToUse = content; 
-        }
-    }
-
-    const niceCaption = generateCaption(titleToUse, platformName, url, flagToUse);
-    const userOriginalMsgId = ctx.callbackQuery.message.reply_to_message?.message_id;
-
     if (action === 'img') {
-        await ctx.answerCbQuery("🚀 Sending...");
-        try { 
-            await ctx.replyWithPhoto(url, { caption: niceCaption, parse_mode: 'HTML', ...getTranslationButtons() });
-            if(userOriginalMsgId) await ctx.telegram.deleteMessage(ctx.chat.id, userOriginalMsgId).catch(()=>{});
-        } catch { 
-            await ctx.replyWithDocument(url, { caption: niceCaption, parse_mode: 'HTML', ...getTranslationButtons() }); 
-        }
+        await ctx.answerCbQuery("Sending...");
+        await ctx.replyWithPhoto(url, { caption: "Image", parse_mode: 'HTML' });
         await ctx.deleteMessage();
     }
     else if (action === 'alb') {
-        await ctx.answerCbQuery("🚀 Processing...");
-        let media = null;
-        if (url.includes('x.com') || url.includes('twitter')) media = await twitterService.extract(url);
-        else media = await redditService.extract(url);
-
-        if (media?.type === 'gallery') {
-            await ctx.deleteMessage();
-            if(userOriginalMsgId) await ctx.telegram.deleteMessage(ctx.chat.id, userOriginalMsgId).catch(()=>{});
-            for (const item of media.items) {
-                try {
-                    if(item.type==='video') await ctx.replyWithVideo(item.url);
-                    else await ctx.replyWithDocument(item.url);
-                } catch {}
-            }
-        }
+        await ctx.answerCbQuery("Processing...");
+        await ctx.deleteMessage();
     }
     else {
-        await ctx.answerCbQuery("🚀 Downloading...");
-        await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, niceCaption, userOriginalMsgId);
+        await ctx.answerCbQuery("Downloading...");
+        await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, null, null);
     }
 };
 
-module.exports = { handleMessage, handleCallback, handleAdmin, handleGroupMessage, handleStart, handleHelp };
+module.exports = { handleMessage, handleCallback, handleGroupMessage, handleStart, handleHelp };
