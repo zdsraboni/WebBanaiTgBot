@@ -1,10 +1,11 @@
-# Use Debian Bullseye (Stable Internet)
+# Use Debian Bullseye (Stable Internet connection)
 FROM node:18-bullseye
 
-# Install Python & FFmpeg
+# Install Python and FFmpeg
 RUN apt-get update && apt-get install -y python3 python3-pip ffmpeg
 
-# Install yt-dlp (Standard command for Bullseye)
+# Install yt-dlp
+# Note: We removed '--break-system-packages' because it is not needed on this version
 RUN python3 -m pip install --upgrade pip \
     && python3 -m pip install yt-dlp
 
