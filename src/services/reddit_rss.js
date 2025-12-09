@@ -1,22 +1,15 @@
 const Parser = require('rss-parser');
+const axios = require('axios'); // ✅ Use Axios for fetching
 const db = require('../utils/db');
 const config = require('../config/settings');
 const handlers = require('../utils/handlers');
 
-// ✅ FIX: ADD CUSTOM HEADERS TO BYPASS 403
-// We pretend to be a standard Android Browser
-const parser = new Parser({
-    headers: {
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-        'Accept': 'application/rss+xml, application/xml, text/xml'
-    }
-});
+const parser = new Parser();
 
 const checkSaved = async (bot) => {
     const adminId = config.ADMIN_ID;
     const user = await db.getAdminConfig(adminId);
 
-    // 1. Check Config
     if (!user || !user.redditConfig || !user.redditConfig.isActive || !user.redditConfig.rssUrl) {
         return;
     }
@@ -24,22 +17,33 @@ const checkSaved = async (bot) => {
     try {
         console.log(`👽 Reddit RSS: Checking feed...`);
         
-        // 2. Fetch Feed
-        const feed = await parser.parseURL(user.redditConfig.rssUrl);
+        // ✅ STEP 1: FETCH WITH AXIOS (Bypasses 403)
+        // We pretend to be a real Windows PC using Chrome
+        const { data } = await axios.get(user.redditConfig.rssUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5'
+            }
+        });
+
+        // ✅ STEP 2: PARSE THE DATA
+        const feed = await parser.parseString(data);
         
         if (!feed || !feed.items || feed.items.length === 0) return;
 
         // 3. Logic to find new posts
         const newestItem = feed.items[0];
+        // Reddit uses the 'link' as the ID in RSS often, or 'id' tag
         const newestId = newestItem.id || newestItem.link; 
         
         const lastId = user.redditConfig.lastPostId;
 
-        // First Run: Just sync, don't download old stuff
+        // First Run
         if (!lastId) {
-            console.log(`👽 Reddit RSS: First run sync. Marking ${newestId}`);
+            console.log(`👽 Reddit RSS: First run. Marking start: ${newestId}`);
             await db.updateRedditLastId(adminId, newestId);
-            await bot.telegram.sendMessage(adminId, `✅ <b>Reddit Feed Connected!</b>\nSynced latest post.\nWaiting for NEW saved posts...`, { parse_mode: 'HTML' });
+            await bot.telegram.sendMessage(adminId, `✅ <b>Reddit Connected!</b>\nSynced. Waiting for new saves...`, { parse_mode: 'HTML' });
             return;
         }
 
@@ -52,8 +56,8 @@ const checkSaved = async (bot) => {
         const newPosts = [];
         for (const item of feed.items) {
             const currentId = item.id || item.link;
-            if (currentId === lastId) break; // Stop if we hit the known post
-            newPosts.unshift(item); // Add to list
+            if (currentId === lastId) break; 
+            newPosts.unshift(item); 
         }
 
         if (newPosts.length > 0) {
@@ -61,12 +65,10 @@ const checkSaved = async (bot) => {
             
             for (const post of newPosts) {
                 const postUrl = post.link;
-                console.log(`👽 Processing Reddit: ${postUrl}`);
+                console.log(`👽 Processing: ${postUrl}`);
 
-                // Determine Target Chat
                 const targetId = user.twitterConfig.webhookTarget || adminId;
 
-                // Mock Context
                 const mockCtx = {
                     from: { id: adminId, first_name: 'Admin' },
                     chat: { id: targetId },
@@ -81,22 +83,17 @@ const checkSaved = async (bot) => {
                     editMessageMedia: (m, e) => bot.telegram.sendVideo(targetId, m.media.source, { caption: m.caption, parse_mode: 'HTML' })
                 };
 
-                // Trigger Download Logic
                 await handlers.handleMessage(mockCtx);
-                
-                // 5s Delay to prevent flood
                 await new Promise(r => setTimeout(r, 5000));
             }
 
-            // Update DB
             await db.updateRedditLastId(adminId, newestId);
         }
 
     } catch (e) {
         console.error("❌ Reddit RSS Error:", e.message);
-        // Hint for user if URL is wrong
-        if (e.message.includes('403')) {
-             console.log("⚠️ Tip: Check if your RSS URL has '?feed=...' and '&user=...' parameters.");
+        if (e.response && e.response.status === 403) {
+            console.log("⚠️ Still 403? Try changing 'old.reddit.com' to 'www.reddit.com' in your link.");
         }
     }
 };
@@ -104,7 +101,7 @@ const checkSaved = async (bot) => {
 const init = (bot) => {
     console.log("🚀 Reddit RSS Engine Started");
     checkSaved(bot);
-    setInterval(() => checkSaved(bot), 2 * 60 * 1000); // Check every 2 mins
+    setInterval(() => checkSaved(bot), 2 * 60 * 1000); 
 };
 
 module.exports = { init };
