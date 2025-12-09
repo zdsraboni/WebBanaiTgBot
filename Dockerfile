@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Install yt-dlp
-# IMPORTANT: We removed '--break-system-packages' because Debian Bullseye doesn't support it
+# IMPORTANT: We removed '--break-system-packages' because Debian Bullseye does not need it
 RUN python3 -m pip install --no-cache-dir --upgrade pip \
     && python3 -m pip install --no-cache-dir yt-dlp
 
