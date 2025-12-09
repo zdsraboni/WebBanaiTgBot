@@ -1,33 +1,25 @@
-const { Telegraf } = require('telegraf');
-const fs = require('fs');
-const config = require('./src/config/settings');
-const logger = require('./src/utils/logger');
-const db = require('./src/utils/db');
+// ... imports ...
+const poller = require('./src/services/poller'); // Import Poller
 
-// Imports
-const { handleMessage, handleCallback, handleGroupMessage, handleStart, handleHelp } = require('./src/utils/handlers');
-const { handleStats, handleBroadcast } = require('./src/utils/admin'); // NEW FILE
-const { setupServer } = require('./src/server/web');
+// ... handlers imports ...
+const { handleMessage, handleCallback, handleGroupMessage, handleStart, handleHelp, handleConfig } = require('./src/utils/handlers');
 
-logger.init();
-if (!fs.existsSync(config.DOWNLOAD_DIR)) fs.mkdirSync(config.DOWNLOAD_DIR, { recursive: true });
-
-// Connect DB
-db.connect(); 
+// ... db connect ...
 
 const bot = new Telegraf(config.BOT_TOKEN);
 
-// --- COMMANDS ---
+// Commands
 bot.start(handleStart);
 bot.help(handleHelp);
-
-// Admin Commands (Now in separate file)
 bot.command('stats', handleStats);
 bot.command('broadcast', handleBroadcast);
 
-// Group & Text Logic
+// ✅ NEW COMMANDS
+bot.command('setup_api', handleConfig);
+bot.command('mode', handleConfig);
+
+// Logic
 bot.on('text', async (ctx, next) => {
-    // Check for Ghost Mentions first
     if (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') {
         await handleGroupMessage(ctx, () => handleMessage(ctx));
     } else {
@@ -36,6 +28,9 @@ bot.on('text', async (ctx, next) => {
 });
 
 bot.on('callback_query', handleCallback);
+
+// ✅ START POLLER
+poller.init(bot);
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
