@@ -29,53 +29,96 @@ const getTranslationButtons = () => {
 // --- START & HELP ---
 const handleStart = async (ctx) => {
     db.addUser(ctx);
-    const text = `👋 <b>Welcome to Media Banai!</b>\nI can download from Twitter, Reddit, Instagram & TikTok.\n\n<b>Features:</b>\n• Real Thumbnails\n• Auto-Split Large Files\n• Translation`;
+    const text = `👋 <b>Welcome to Media Banai!</b>\nI can download from Twitter, Reddit, Instagram & TikTok.\n\n<b>Features:</b>\n• Auto-Split Large Files\n• Real Thumbnails\n• Translation`;
     const buttons = Markup.inlineKeyboard([[Markup.button.callback('📚 Help', 'help_msg'), Markup.button.callback('📊 Stats', 'stats_msg')]]);
     if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
     else await ctx.reply(text, { parse_mode: 'HTML', ...buttons });
 };
 
 const handleHelp = async (ctx) => {
-    const text = `📚 <b>Help Guide</b>\n\n<b>1. Downloads:</b> Send any valid link.\n<b>2. Custom Caption:</b> Add text after link.\n<b>3. Ghost Mention:</b> Reply + <code>/setnick name</code>.\n<b>4. Automation:</b> Use the Webhook API to send links silently.`;
+    const text = `📚 <b>Help Guide</b>\n\n<b>1. Downloads:</b> Send any valid link.\n<b>2. Custom Caption:</b> Add text after link.\n<b>3. Edit Caption:</b> Reply to bot message with <code>/caption New Text</code>.\n<b>4. Automation:</b> Use Webhook API.`;
     const buttons = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'start_msg')]]);
     if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
     else await ctx.reply(text, { parse_mode: 'HTML' });
 };
 
-// --- CONFIG HANDLER (Updated for Destination) ---
+// --- CONFIG HANDLER ---
 const handleConfig = async (ctx) => {
-    // Only Admin can configure
     if (String(ctx.from.id) !== String(config.ADMIN_ID)) return;
     const text = ctx.message.text;
 
-    // ✅ NEW: Set Destination
     if (text.startsWith('/set_destination')) {
         let targetId = ctx.chat.id;
         let title = ctx.chat.title || "Private Chat";
-
-        // Reset Logic
-        if (text.includes('reset')) {
-            targetId = ""; // Empty means default to Admin ID
-            title = "Default (Your Private Chat)";
-        }
-
+        if (text.includes('reset')) { targetId = ""; title = "Default"; }
         await db.setWebhookTarget(config.ADMIN_ID, targetId);
-        return ctx.reply(`✅ <b>Destination Updated!</b>\nNew Target: <b>${title}</b>\n(ID: ${targetId || 'Default'})`, { parse_mode: 'HTML' });
+        return ctx.reply(`✅ Target: <b>${title}</b>`, { parse_mode: 'HTML' });
     }
-
     if (text.startsWith('/setup_api')) {
         const parts = text.split(' ');
-        if (parts.length < 3) return ctx.reply("⚠️ Usage: `/setup_api KEY USERNAME`", { parse_mode: 'Markdown' });
+        if (parts.length < 3) return ctx.reply("Usage: /setup_api KEY USER");
         await db.updateApiConfig(ctx.from.id, parts[1], parts[2]);
-        return ctx.reply("✅ <b>API Mode Configured!</b>\nChecking every 1 min.", { parse_mode: 'HTML' });
+        return ctx.reply("✅ API Configured!");
     }
-
     if (text.startsWith('/mode')) {
         const mode = text.split(' ')[1];
-        if (mode !== 'api' && mode !== 'webhook') return ctx.reply("⚠️ Usage: `/mode api` or `/mode webhook`", { parse_mode: 'Markdown' });
         await db.toggleMode(ctx.from.id, mode);
-        return ctx.reply(`🔄 Mode switched to: <b>${mode.toUpperCase()}</b>`, { parse_mode: 'HTML' });
+        return ctx.reply(`🔄 Mode: <b>${mode}</b>`, { parse_mode: 'HTML' });
     }
+};
+
+// --- ✅ NEW: CAPTION EDITOR ---
+const handleEditCaption = async (ctx) => {
+    const text = ctx.message.text;
+    
+    // Only run if command is /caption
+    if (!text || !text.startsWith('/caption')) return false;
+
+    // Check Reply
+    if (!ctx.message.reply_to_message) {
+        await ctx.reply("⚠️ Reply to a message to edit it.", { reply_to_message_id: ctx.message.message_id });
+        return true; 
+    }
+
+    // Check Bot Ownership (Can only edit own messages)
+    if (ctx.message.reply_to_message.from.id !== ctx.botInfo.id) {
+        await ctx.reply("⚠️ I can only edit my own messages.", { reply_to_message_id: ctx.message.message_id });
+        return true;
+    }
+
+    // Extract New Text
+    const newCaption = text.replace(/^\/caption\s*/, '').trim();
+    if (!newCaption) {
+        await ctx.reply("⚠️ Usage: <code>/caption New Title Here</code>", { parse_mode: 'HTML', reply_to_message_id: ctx.message.message_id });
+        return true;
+    }
+
+    try {
+        // Edit the caption
+        // We assume we want to keep the buttons (like translation buttons) if they exist
+        const extra = {
+            parse_mode: 'HTML',
+            reply_markup: ctx.message.reply_to_message.reply_markup
+        };
+
+        await ctx.telegram.editMessageCaption(
+            ctx.chat.id,
+            ctx.message.reply_to_message.message_id,
+            null,
+            newCaption,
+            extra
+        );
+
+        // Feedback & Cleanup
+        await ctx.deleteMessage().catch(()=>{}); // Delete the /caption command
+        const confirm = await ctx.reply("✅ Updated!");
+        setTimeout(() => ctx.telegram.deleteMessage(ctx.chat.id, confirm.message_id).catch(()=>{}), 2000);
+
+    } catch (e) {
+        await ctx.reply(`❌ Error: ${e.description}`, { reply_to_message_id: ctx.message.message_id });
+    }
+    
+    return true; // Stop other handlers
 };
 
 // --- DOWNLOADER ---
@@ -261,7 +304,7 @@ const handleCallback = async (ctx) => {
     else await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, ctx.callbackQuery.message.caption, null);
 };
 
-// EXPORT
+// Export ALL handlers
 module.exports = { 
-    handleMessage, handleCallback, handleGroupMessage, handleStart, handleHelp, performDownload, handleConfig 
+    handleMessage, handleCallback, handleGroupMessage, handleStart, handleHelp, performDownload, handleConfig, handleEditCaption 
 };
