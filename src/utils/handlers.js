@@ -29,31 +29,31 @@ const getTranslationButtons = () => {
 // --- START & HELP ---
 const handleStart = async (ctx) => {
     db.addUser(ctx);
-    const text = `👋 <b>Welcome to Media Banai!</b>\nI can download from Twitter, Reddit, Instagram & TikTok.\n\n<b>Features:</b>\n• Real Thumbnails (With Cookies)\n• Auto-Split Large Files\n• Translation`;
+    const text = `👋 <b>Welcome to Media Banai!</b>\nI can download from Twitter, Reddit, Instagram & TikTok.\n\n<b>Features:</b>\n• Auto-Split Large Files\n• Real Thumbnails\n• Translation`;
     const buttons = Markup.inlineKeyboard([[Markup.button.callback('📚 Help', 'help_msg'), Markup.button.callback('📊 Stats', 'stats_msg')]]);
     if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
     else await ctx.reply(text, { parse_mode: 'HTML', ...buttons });
 };
 
 const handleHelp = async (ctx) => {
-    const text = `📚 <b>Help Guide</b>\n\n<b>1. Downloads:</b> Send any valid link.\n<b>2. Custom Caption:</b> Add text after link.\n<b>3. Ghost Mention:</b> Reply + <code>/setnick name</code>.\n<b>4. Automation:</b> Use the Webhook API to send links silently.`;
+    const text = `📚 <b>Help Guide</b>\n\n<b>1. Downloads:</b> Send any valid link.\n<b>2. Custom Caption:</b> Add text after link.\n<b>3. Ghost Mention:</b> Reply + <code>/setnick name</code>.\n<b>4. Automation:</b> Use the Webhook API.`;
     const buttons = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'start_msg')]]);
     if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
     else await ctx.reply(text, { parse_mode: 'HTML' });
 };
 
-// --- DOWNLOADER WITH SPLITTER ---
+// --- DOWNLOADER (UPDATED: REPLACES MESSAGE) ---
 const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionText, userMsgId) => {
     try {
+        // 1. Delete user command if possible
         if (userMsgId && userMsgId !== 0) { try { await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId); } catch (err) {} }
         
-        // Ensure we have a loading status
+        // 2. Update Caption to show status (Keep the preview image for now)
         try {
-            await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, `⏳ *Downloading...*`, { parse_mode: 'Markdown' });
+            await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⏳ <b>Downloading...</b>", { parse_mode: 'HTML' });
         } catch (e) {
-            // If message implies it's a photo caption edit failed, send new text
-            const newMsg = await ctx.reply(`⏳ *Downloading...*`, { parse_mode: 'Markdown' });
-            botMsgId = newMsg.message_id;
+            // If editing fails (e.g., message too old or text-only), send a fresh status
+            // But we prefer editing the existing one.
         }
 
         const timestamp = Date.now();
@@ -62,43 +62,67 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
 
         await downloader.download(url, isAudio, qualityId, basePath);
 
+        // Splitter Check
         let filesToSend = [finalFile];
         const stats = fs.statSync(finalFile);
         if (!isAudio && stats.size > 49.5 * 1024 * 1024) {
-            await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, "⚠️ *File > 50MB. Splitting...*", { parse_mode: 'Markdown' });
+            // Update status again
+            await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⚠️ <b>File > 50MB. Splitting...</b>", { parse_mode: 'HTML' });
             try { filesToSend = await downloader.splitFile(finalFile); } 
-            catch (e) { return await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, "❌ Split failed."); }
+            catch (e) { return await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "❌ Split failed.", { parse_mode: 'HTML' }); }
         }
 
-        await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, "📤 *Uploading...*", { parse_mode: 'Markdown' });
-        
+        // 3. SEND / REPLACE LOGIC
         for (let i = 0; i < filesToSend.length; i++) {
             const file = filesToSend[i];
             let partCaption = captionText || '🚀 Media Banai';
             if (filesToSend.length > 1) partCaption += `\n\n🧩 <b>Part ${i + 1}/${filesToSend.length}</b>`;
             
             const extra = { caption: partCaption, parse_mode: 'HTML', ...(i === filesToSend.length - 1 ? getTranslationButtons() : {}) };
-            if (isAudio) await ctx.replyWithAudio({ source: file }, extra);
-            else await ctx.replyWithVideo({ source: file }, extra);
+
+            // ✅ MAGIC: REPLACE THE PREVIEW MESSAGE
+            // If it's the first part, we try to EDIT the existing message bubble.
+            if (i === 0) {
+                try {
+                    await ctx.telegram.editMessageMedia(
+                        ctx.chat.id,
+                        botMsgId,
+                        null,
+                        {
+                            type: isAudio ? 'audio' : 'video',
+                            media: { source: file },
+                            caption: partCaption,
+                            parse_mode: 'HTML'
+                        },
+                        { ...extra.reply_markup } // Preserve buttons if any
+                    );
+                } catch (editError) {
+                    // Fallback: If we can't edit (e.g. changing Text -> Video is not allowed), delete and send new
+                    console.log("Edit failed, sending new message:", editError.message);
+                    await ctx.telegram.deleteMessage(ctx.chat.id, botMsgId).catch(()=>{});
+                    if (isAudio) await ctx.replyWithAudio({ source: file }, extra);
+                    else await ctx.replyWithVideo({ source: file }, extra);
+                }
+            } else {
+                // For Part 2, Part 3... send as new messages
+                if (isAudio) await ctx.replyWithAudio({ source: file }, extra);
+                else await ctx.replyWithVideo({ source: file }, extra);
+            }
+
             if (fs.existsSync(file)) fs.unlinkSync(file);
         }
 
         const userId = ctx.callbackQuery ? ctx.callbackQuery.from.id : (ctx.message ? ctx.message.from.id : null);
         if (userId) db.incrementDownloads(userId);
 
-        await ctx.telegram.deleteMessage(ctx.chat.id, botMsgId).catch(() => {});
-
     } catch (e) {
         console.error(e);
         let errorMsg = "❌ Error/Timeout.";
-        if (e.message.includes('403')) errorMsg = "❌ Error: Forbidden (Check Cookies)";
-        if (e.message.includes('Sign in')) errorMsg = "❌ Error: Login Required (Check Cookies)";
+        if (e.message.includes('403')) errorMsg = "❌ Error: Forbidden (Cookies needed?)";
+        if (e.message.includes('Sign in')) errorMsg = "❌ Error: Age/Login Restricted.";
         
-        try {
-            await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, `${errorMsg}\n\nLog: \`${e.message.substring(0, 50)}...\``, { parse_mode: 'Markdown' });
-        } catch {
-            await ctx.reply(`${errorMsg}`, { parse_mode: 'Markdown' });
-        }
+        // Show error on the existing message
+        await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, `${errorMsg}\n\nLog: \`${e.message.substring(0, 50)}...\``, { parse_mode: 'Markdown' });
         
         const basePath = path.join(config.DOWNLOAD_DIR, `${Date.now()}`);
         if (fs.existsSync(`${basePath}.mp4`)) fs.unlinkSync(`${basePath}.mp4`);
@@ -118,54 +142,31 @@ const handleMessage = async (ctx) => {
     const postText = parts[1].trim(); 
     let flagEmoji = (preText.length === 2 && /^[a-zA-Z]+$/.test(preText)) ? getFlagEmoji(preText) : '🇧🇩';
 
-    const msg = await ctx.reply("🔍 *Fetching Real Metadata...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
+    const msg = await ctx.reply("🔍 *Analyzing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
         const fullUrl = await resolveRedirect(inputUrl);
         let media = null;
         let platformName = 'Social';
 
-        // --- PLATFORM DETECTION ---
         if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
+            media = await twitterService.extract(fullUrl);
             platformName = 'Twitter';
-            // ✅ PRIORITY 1: USE YT-DLP (COOKIES) FIRST
-            // This ensures we get the REAL thumbnail, not the generic Twitter logo
-            try {
-                const info = await downloader.getInfo(fullUrl);
-                media = {
-                    title: info.title || 'Twitter Media',
-                    author: info.uploader || 'Twitter User',
-                    source: fullUrl,
-                    type: 'video',
-                    url: fullUrl,
-                    thumbnail: info.thumbnail, // <--- REAL THUMBNAIL
-                    formats: info.formats || []
-                };
-            } catch (e) {
-                // If Cookie fetch fails, fallback to scraper (Low quality thumbnail)
-                console.log("⚠️ Cookies failed, using scraper.");
-                media = await twitterService.extract(fullUrl);
+            if (!media) {
+                try {
+                    const info = await downloader.getInfo(fullUrl);
+                    media = { title: info.title, author: info.uploader, source: fullUrl, type: 'video', url: fullUrl, thumbnail: info.thumbnail, formats: info.formats || [] };
+                } catch (e) { media = { title: 'Twitter Media', author: 'User', source: fullUrl, type: 'video', url: fullUrl }; }
             }
-        } 
-        else if (fullUrl.includes('reddit.com')) {
+        } else if (fullUrl.includes('reddit.com')) {
             media = await redditService.extract(fullUrl);
             platformName = 'Reddit';
-        } 
-        else {
-            // Instagram / TikTok
+        } else {
             if (fullUrl.includes('instagram.com')) platformName = 'Instagram';
             if (fullUrl.includes('tiktok.com')) platformName = 'TikTok';
             try {
                 const info = await downloader.getInfo(fullUrl);
-                media = { 
-                    title: info.title || 'Social Video', 
-                    author: info.uploader || 'User', 
-                    source: fullUrl, 
-                    type: 'video', 
-                    url: fullUrl,
-                    thumbnail: info.thumbnail, 
-                    formats: info.formats || [] 
-                };
+                media = { title: info.title, author: info.uploader, source: fullUrl, type: 'video', url: fullUrl, thumbnail: info.thumbnail, formats: info.formats || [] };
             } catch (e) { media = { title: 'Video', author: 'User', source: fullUrl, type: 'video', formats: [] }; }
         }
 
@@ -173,9 +174,10 @@ const handleMessage = async (ctx) => {
 
         const prettyCaption = generateCaption(postText || media.title, platformName, media.source, flagEmoji);
 
-        // --- PREVIEW WITH BUTTONS ---
         const buttons = [];
-        if (media.type === 'video') {
+        if (media.type === 'gallery') buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
+        else if (media.type === 'image') buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
+        else if (media.type === 'video') {
             if (media.formats && media.formats.length > 0) {
                 const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height);
                 const seen = new Set();
@@ -186,17 +188,11 @@ const handleMessage = async (ctx) => {
             buttons.push([Markup.button.callback("📹 Download Video (Best)", "vid|best")]);
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
-        else if (media.type === 'gallery') buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
-        else if (media.type === 'image') buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
-
-        // ✅ SEND PHOTO (Forces Telegram to show the real thumbnail we fetched)
+        
+        // Ensure we send a Photo message (Required for editMessageMedia video replacement to work smoothly)
         if (media.thumbnail) {
             await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(()=>{});
-            await ctx.replyWithPhoto(media.thumbnail, { 
-                caption: prettyCaption, 
-                parse_mode: 'HTML', 
-                ...Markup.inlineKeyboard(buttons) 
-            });
+            await ctx.replyWithPhoto(media.thumbnail, { caption: prettyCaption, parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) });
         } else {
             await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, `${prettyCaption}`, { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) });
         }
@@ -238,7 +234,7 @@ const handleCallback = async (ctx) => {
     if (action === 'start_msg') return handleStart(ctx);
     if (action === 'stats_msg') return ctx.answerCbQuery("Use /stats", { show_alert: true });
     
-    // ✅ URL RECOVERY: Check Caption entities first (for Photo messages)
+    // Check Caption entities first
     const entities = ctx.callbackQuery.message.caption_entities || ctx.callbackQuery.message.entities;
     const url = entities?.find(e => e.type === 'text_link')?.url;
 
