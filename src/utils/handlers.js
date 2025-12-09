@@ -26,28 +26,78 @@ const getTranslationButtons = () => {
     return Markup.inlineKeyboard([[Markup.button.callback('🇺🇸 English', 'trans|en'), Markup.button.callback('🇧🇩 Bangla', 'trans|bn')]]);
 };
 
-// --- START & HELP ---
+// --- START HANDLER ---
 const handleStart = async (ctx) => {
     db.addUser(ctx);
-    const text = `👋 <b>Welcome to Media Banai!</b>\nI can download from Twitter, Reddit, Instagram & TikTok.\n\n<b>Features:</b>\n• Auto-Split Large Files\n• Real Thumbnails\n• Translation`;
-    const buttons = Markup.inlineKeyboard([[Markup.button.callback('📚 Help', 'help_msg'), Markup.button.callback('📊 Stats', 'stats_msg')]]);
+    const text = `👋 <b>Welcome to Media Banai!</b>\n\nI am your professional media assistant. I support:\n• 🐦 <b>Twitter / X</b>\n• 👽 <b>Reddit</b>\n• 📸 <b>Instagram</b>\n• 🎵 <b>TikTok</b>\n\n<i>Click Help for a full tutorial!</i>`;
+    const buttons = Markup.inlineKeyboard([
+        [Markup.button.callback('📚 Full Guide / Help', 'help_msg')],
+        [Markup.button.callback('📊 My Stats', 'stats_msg')]
+    ]);
     if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
     else await ctx.reply(text, { parse_mode: 'HTML', ...buttons });
 };
 
+// --- ✅ PROFESSIONAL HELP GUIDE ---
 const handleHelp = async (ctx) => {
-    const text = `📚 <b>Help Guide</b>\n\n<b>1. Downloads:</b> Send any valid link.\n<b>2. Config:</b> /setup_reddit, /reddit_on, /reddit_off.\n<b>3. Automation:</b> /setup_api, /mode webhook.`;
-    const buttons = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'start_msg')]]);
-    if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
-    else await ctx.reply(text, { parse_mode: 'HTML' });
+    const text = `
+📚 <b>Media Banai User Guide</b>
+
+<b>1. 📥 Downloading Media</b>
+Simply send any link from supported platforms.
+• I will fetch the <b>Real Thumbnail</b> and show quality options.
+• <b>Large Files (>50MB)</b> are automatically split into parts.
+
+<b>2. ✍️ Customizing Posts</b>
+You can style your upload before sending the link:
+• <b>Custom Caption:</b> Add text <i>after</i> the link.
+  <code>https://x.com/post Wow amazing!</code>
+• <b>Country Flag:</b> Add code (us, bd, in) <i>before</i> link.
+  <code>us https://x.com/post</code>
+
+<b>3. ✏️ Edit After Sending</b>
+Made a mistake? Reply to any video I sent with:
+• <code>/caption New Title Here</code>
+(I will update the text immediately!)
+
+<b>4. 👻 Ghost Mentions (Groups)</b>
+Tag friends without cluttering the chat!
+• <b>Setup:</b> Reply to them: <code>/setnick bro</code>
+• <b>Use:</b> Type <code>bro</code> in chat.
+• <b>Result:</b> I delete your text & tag them silently.
+
+<b>5. 👽 Reddit Auto-Saver</b>
+I can download posts you 'Save' on Reddit automatically.
+• <b>Setup:</b> <code>/setup_reddit [RSS_LINK]</code>
+• <b>Turn On/Off:</b> <code>/reddit_on</code> | <code>/reddit_off</code>
+• <b>Speed:</b> <code>/reddit_interval 10</code> (Minutes)
+
+<b>6. ⚡ Automation (Webhooks)</b>
+Connect IFTTT or Phone Shortcuts to download without opening Telegram!
+• <b>Setup:</b> <code>/setup_api [KEY] [USER]</code> (For TwitterAPI)
+• <b>Mode:</b> <code>/mode webhook</code> (Free) or <code>/mode api</code> (Paid)
+• <b>Destination:</b> <code>/set_destination</code> (Send to Group)
+
+<i>Tap a button below to close this guide.</i>
+    `.trim();
+
+    const buttons = Markup.inlineKeyboard([
+        [Markup.button.callback('🔙 Back to Menu', 'start_msg')]
+    ]);
+
+    if (ctx.callbackQuery) {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons, disable_web_page_preview: true }).catch(()=>{});
+    } else {
+        await ctx.reply(text, { parse_mode: 'HTML', ...buttons, disable_web_page_preview: true });
+    }
 };
 
-// --- CONFIG HANDLER (UPDATED) ---
+// --- CONFIG HANDLER ---
 const handleConfig = async (ctx) => {
     if (String(ctx.from.id) !== String(config.ADMIN_ID)) return;
     const text = ctx.message.text;
 
-    // REDDIT CONTROLS
+    // Reddit Config
     if (text.startsWith('/setup_reddit')) {
         const parts = text.split(' ');
         if (parts.length < 2) return ctx.reply("⚠️ Usage: `/setup_reddit RSS_URL`", { parse_mode: 'Markdown' });
@@ -70,19 +120,19 @@ const handleConfig = async (ctx) => {
         return ctx.reply(`⏱️ <b>Interval Updated!</b>\nChecking every ${mins} minutes.`, { parse_mode: 'HTML' });
     }
 
-    // OTHER CONTROLS (Destination / API)
+    // Other Configs
     if (text.startsWith('/set_destination')) {
         let targetId = ctx.chat.id;
         let title = ctx.chat.title || "Private Chat";
-        if (text.includes('reset')) { targetId = ""; title = "Default"; }
+        if (text.includes('reset')) { targetId = ""; title = "Default (Private)"; }
         await db.setWebhookTarget(config.ADMIN_ID, targetId);
-        return ctx.reply(`✅ Target: <b>${title}</b>`, { parse_mode: 'HTML' });
+        return ctx.reply(`✅ <b>Destination Updated!</b>\nTarget: <b>${title}</b>`, { parse_mode: 'HTML' });
     }
     if (text.startsWith('/setup_api')) {
         const parts = text.split(' ');
-        if (parts.length < 3) return ctx.reply("Usage: /setup_api KEY USER");
+        if (parts.length < 3) return ctx.reply("⚠️ Usage: `/setup_api KEY USER`", { parse_mode: 'Markdown' });
         await db.updateApiConfig(ctx.from.id, parts[1], parts[2]);
-        return ctx.reply("✅ API Configured!");
+        return ctx.reply("✅ <b>API Configured!</b>", { parse_mode: 'HTML' });
     }
     if (text.startsWith('/mode')) {
         const mode = text.split(' ')[1];
@@ -91,20 +141,23 @@ const handleConfig = async (ctx) => {
     }
 };
 
-// ... (KEEP THE REST OF THE FILE: handleEditCaption, performDownload, handleMessage, etc. EXACTLY AS BEFORE)
-// I am truncating the bottom to save space, but DO NOT DELETE the rest of your handlers file.
-// Just insert the new 'handleConfig' logic above into your existing file.
-
-// Wait, I will provide full file to avoid errors.
 // --- CAPTION EDITOR ---
 const handleEditCaption = async (ctx) => {
     const text = ctx.message.text;
     if (!text || !text.startsWith('/caption')) return false;
     if (!ctx.message.reply_to_message || ctx.message.reply_to_message.from.id !== ctx.botInfo.id) return true;
+
     const newCaption = text.replace(/^\/caption\s*/, '').trim();
     if (!newCaption) return true;
+
     try {
-        await ctx.telegram.editMessageCaption(ctx.chat.id, ctx.message.reply_to_message.message_id, null, newCaption, { parse_mode: 'HTML', reply_markup: ctx.message.reply_to_message.reply_markup });
+        await ctx.telegram.editMessageCaption(
+            ctx.chat.id,
+            ctx.message.reply_to_message.message_id,
+            null,
+            newCaption,
+            { parse_mode: 'HTML', reply_markup: ctx.message.reply_to_message.reply_markup }
+        );
         await ctx.deleteMessage().catch(()=>{});
         const confirm = await ctx.reply("✅ Updated!");
         setTimeout(() => ctx.telegram.deleteMessage(ctx.chat.id, confirm.message_id).catch(()=>{}), 2000);
@@ -113,7 +166,7 @@ const handleEditCaption = async (ctx) => {
 };
 
 // --- DOWNLOADER ---
-const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionText, userMsgId) => {
+const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, htmlCaption, userMsgId) => {
     try {
         if (userMsgId && userMsgId !== 0) { try { await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId); } catch (err) {} }
         try { await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⏳ <b>Downloading...</b>", { parse_mode: 'HTML' }); } catch (e) {}
@@ -134,33 +187,45 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
 
         for (let i = 0; i < filesToSend.length; i++) {
             const file = filesToSend[i];
+            
             if (i === 0) {
                 try {
                     await ctx.telegram.editMessageMedia(
-                        ctx.chat.id, botMsgId, null,
-                        { type: isAudio ? 'audio' : 'video', media: { source: file }, caption: captionText, parse_mode: 'HTML' },
+                        ctx.chat.id,
+                        botMsgId,
+                        null,
+                        {
+                            type: isAudio ? 'audio' : 'video',
+                            media: { source: file },
+                            caption: htmlCaption, 
+                            parse_mode: 'HTML'
+                        },
                         { ...getTranslationButtons().reply_markup } 
                     );
                 } catch (editError) {
                     await ctx.telegram.deleteMessage(ctx.chat.id, botMsgId).catch(()=>{});
-                    if (isAudio) await ctx.replyWithAudio({ source: file }, { caption: captionText, parse_mode: 'HTML', ...getTranslationButtons() });
-                    else await ctx.replyWithVideo({ source: file }, { caption: captionText, parse_mode: 'HTML', ...getTranslationButtons() });
+                    if (isAudio) await ctx.replyWithAudio({ source: file }, { caption: htmlCaption, parse_mode: 'HTML', ...getTranslationButtons() });
+                    else await ctx.replyWithVideo({ source: file }, { caption: htmlCaption, parse_mode: 'HTML', ...getTranslationButtons() });
                 }
             } else {
-                let partCaption = captionText + `\n\n🧩 <b>Part ${i + 1}</b>`;
+                let partCaption = htmlCaption + `\n\n🧩 <b>Part ${i + 1}</b>`;
                 if (isAudio) await ctx.replyWithAudio({ source: file }, { caption: partCaption, parse_mode: 'HTML' });
                 else await ctx.replyWithVideo({ source: file }, { caption: partCaption, parse_mode: 'HTML' });
             }
             if (fs.existsSync(file)) fs.unlinkSync(file);
         }
+
         const userId = ctx.callbackQuery ? ctx.callbackQuery.from.id : (ctx.message ? ctx.message.from.id : null);
         if (userId) db.incrementDownloads(userId);
+
     } catch (e) {
         let errorMsg = "❌ Error/Timeout.";
         if (e.message.includes('403')) errorMsg = "❌ Error: Forbidden (Check Cookies)";
         if (e.message.includes('Sign in')) errorMsg = "❌ Error: Login Required (Check Cookies)";
+        
         try { await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, `${errorMsg}\n\nLog: \`${e.message.substring(0, 50)}...\``, { parse_mode: 'Markdown' }); } 
         catch { await ctx.reply(`${errorMsg}`, { parse_mode: 'Markdown' }); }
+        
         const basePath = path.join(config.DOWNLOAD_DIR, `${Date.now()}`);
         if (fs.existsSync(`${basePath}.mp4`)) fs.unlinkSync(`${basePath}.mp4`);
     }
@@ -272,14 +337,27 @@ const handleCallback = async (ctx) => {
     const entities = ctx.callbackQuery.message.caption_entities || ctx.callbackQuery.message.entities;
     const url = entities?.find(e => e.type === 'text_link')?.url;
 
+    // RECONSTRUCT CAPTION (Keep formatting safe)
+    const rawCaption = ctx.callbackQuery.message.caption;
+    const bodyParts = rawCaption ? rawCaption.split('\n') : [];
+    let bodyText = bodyParts.length > 2 ? bodyParts.slice(2).join('\n') : rawCaption;
+    
+    let flag = '🇧🇩';
+    const firstLine = bodyParts[0] || "";
+    if (firstLine.includes('🇺🇸')) flag = '🇺🇸'; 
+
+    let platform = 'Social';
+    if (rawCaption && rawCaption.toLowerCase().includes('twitter')) platform = 'Twitter';
+    if (rawCaption && rawCaption.toLowerCase().includes('reddit')) platform = 'Reddit';
+
+    const htmlCaption = generateCaption(bodyText, platform, url || "http", flag);
+
     if (action === 'trans') {
-        const msg = ctx.callbackQuery.message.caption;
-        if (!msg) return ctx.answerCbQuery("No text");
+        if (!rawCaption) return ctx.answerCbQuery("No text");
         await ctx.answerCbQuery("Translating...");
         try {
-            const res = await translate(msg.split('\n').slice(2).join('\n') || msg, { to: id, autoCorrect: true });
-            const link = url || "http"; 
-            await ctx.editMessageCaption(generateCaption(res.text, 'Social', link, '🇧🇩'), { parse_mode: 'HTML', ...getTranslationButtons() });
+            const res = await translate(bodyText, { to: id, autoCorrect: true });
+            await ctx.editMessageCaption(generateCaption(res.text, platform, url, '🇧🇩'), { parse_mode: 'HTML', ...getTranslationButtons() });
         } catch(e) { await ctx.answerCbQuery("Error"); }
         return;
     }
@@ -287,7 +365,7 @@ const handleCallback = async (ctx) => {
     if (!url) return ctx.answerCbQuery("Expired. Send link again.");
 
     if (action === 'img') { await ctx.answerCbQuery("Sending..."); await ctx.replyWithPhoto(url); await ctx.deleteMessage(); }
-    else await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, ctx.callbackQuery.message.caption, null);
+    else await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, htmlCaption, null);
 };
 
 module.exports = { 
