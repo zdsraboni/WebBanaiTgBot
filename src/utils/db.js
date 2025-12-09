@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const config = require('../config/settings');
 
-// 1. Updated User Schema
+// 1. Updated Schema with 'webhookTarget'
 const UserSchema = new mongoose.Schema({
     id: { type: String, unique: true },
     username: { type: String },
@@ -9,12 +9,14 @@ const UserSchema = new mongoose.Schema({
     downloads: { type: Number, default: 0 },
     joinedAt: { type: Date, default: Date.now },
     
-    // ✅ NEW: Twitter API Config
+    // Configuration
     twitterConfig: {
-        mode: { type: String, default: 'webhook' }, // 'webhook' OR 'api'
+        mode: { type: String, default: 'webhook' }, 
         apiKey: { type: String, default: '' },
         targetHandle: { type: String, default: '' },
-        lastLikedId: { type: String, default: '0' } // Tracks the last post we saw
+        lastLikedId: { type: String, default: '0' },
+        // ✅ NEW: Where to send webhook messages? (Default: Admin Private Chat)
+        webhookTarget: { type: String, default: '' } 
     }
 });
 
@@ -54,13 +56,21 @@ const addUser = async (ctx) => {
     } catch (e) {}
 };
 
-// ✅ NEW CONFIG FUNCTIONS
+// --- CONFIG FUNCTIONS ---
 const getAdminConfig = async (adminId) => {
     return await User.findOne({ id: String(adminId) });
 };
 
+// ✅ NEW: Set the Destination
+const setWebhookTarget = async (adminId, targetId) => {
+    return await User.findOneAndUpdate(
+        { id: String(adminId) },
+        { 'twitterConfig.webhookTarget': String(targetId) },
+        { new: true }
+    );
+};
+
 const updateApiConfig = async (adminId, apiKey, handle) => {
-    // Reset lastLikedId to 0 when setting up new API to trigger "First Run" logic
     return await User.findOneAndUpdate(
         { id: String(adminId) },
         { 
@@ -113,5 +123,5 @@ const deleteNickname = async (groupId, name) => { return await Nickname.deleteOn
 module.exports = { 
     connect, addUser, incrementDownloads, getDetailedStats, getAllUsers, 
     setNickname, getNickname, deleteNickname,
-    getAdminConfig, updateApiConfig, updateLastId, toggleMode 
+    getAdminConfig, updateApiConfig, updateLastId, toggleMode, setWebhookTarget 
 };
