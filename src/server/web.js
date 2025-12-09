@@ -7,65 +7,59 @@ const handlers = require('../utils/handlers');
 const setupServer = (bot) => {
     const app = express();
 
+    // ✅ ENABLE PARSING (So we can read POST body data too)
+    app.use(express.json());
+    app.use(express.urlencoded({ extended: true }));
+
     // 1. Logs
     app.get('/api/logs', (req, res) => res.json(logger.getLogs()));
 
-    // 2. DEBUG WEBHOOK (See what IFTTT sends)
-    app.get('/api/trigger', async (req, res) => {
-        const queryData = req.query; // This holds ?secret=...&url=...
-        const { secret, url } = queryData;
+    // 2. SUPER DEBUG WEBHOOK (Accepts GET and POST)
+    app.all('/api/trigger', async (req, res) => {
+        const method = req.method; // GET or POST
+        const query = req.query;   // Data in URL (?url=...)
+        const body = req.body;     // Data in Body (JSON)
 
-        // A. Respond to IFTTT immediately to prevent Timeout
+        console.log(`🔔 Webhook Hit via ${method}`);
+        console.log("Query:", JSON.stringify(query));
+        console.log("Body:", JSON.stringify(body));
+
+        // Reply to IFTTT immediately
         res.status(200).send('✅ Debug Data Received');
 
         try {
             const userId = config.ADMIN_ID; 
 
-            // B. LOG TO CONSOLE (Check Render Logs)
-            console.log("🔔 Webhook Hit! Data:", JSON.stringify(queryData));
+            // BUILD THE REPORT
+            let msg = `🕵️ <b>IFTTT Data Dump</b>\n`;
+            msg += `-----------------------------\n`;
+            msg += `<b>Method:</b> ${method}\n`;
+            msg += `<b>Secret Received:</b> <code>${query.secret || body.secret || 'NONE'}</code>\n`;
+            msg += `<b>My Secret:</b> <code>${config.ADMIN_ID}</code>\n\n`;
 
-            // C. SEND DEBUG REPORT TO TELEGRAM
-            // This tells you exactly what arrived
-            let report = `🕵️ <b>Webhook Debug Report</b>\n`;
-            report += `<b>Status:</b> Connection Successful\n`;
-            report += `<b>Secret Received:</b> <code>${secret || 'None'}</code>\n`;
-            report += `<b>Correct Secret:</b> <code>${config.ADMIN_ID}</code>\n`;
-            report += `<b>URL Received:</b> ${url ? url : '❌ NONE'}\n\n`;
-            
-            // Check if secret matches
-            if (String(secret) !== String(config.ADMIN_ID)) {
-                report += `⚠️ <b>PASSWORD MISMATCH!</b> Check IFTTT settings.`;
-                await bot.telegram.sendMessage(userId, report, { parse_mode: 'HTML' });
-                return; // Stop here if password wrong
+            // SHOW QUERY PARAMS (What's in the URL)
+            if (Object.keys(query).length > 0) {
+                msg += `<b>📥 URL Parameters:</b>\n<pre>${JSON.stringify(query, null, 2)}</pre>\n\n`;
             }
 
-            // D. IF URL IS MISSING
-            if (!url) {
-                report += `⚠️ <b>NO URL FOUND!</b> Check if IFTTT Ingredient is set.`;
-                await bot.telegram.sendMessage(userId, report, { parse_mode: 'HTML' });
-                return;
+            // SHOW BODY DATA (If IFTTT sent JSON)
+            if (Object.keys(body).length > 0) {
+                msg += `<b>📦 Body/JSON Data:</b>\n<pre>${JSON.stringify(body, null, 2)}</pre>\n`;
             }
 
-            // E. IF EVERYTHING IS GOOD -> RUN BOT
-            await bot.telegram.sendMessage(userId, `${report}✅ <b>Starting Download...</b>`, { parse_mode: 'HTML' });
+            // ANALYSIS
+            const receivedUrl = query.url || body.url;
+            if (!receivedUrl) {
+                msg += `❌ <b>ERROR:</b> No 'url' found in data!`;
+            } else {
+                msg += `✅ <b>URL Found:</b> ${receivedUrl}`;
+            }
 
-            // Create Fake Context
-            const mockCtx = {
-                from: { id: userId, first_name: 'Admin', is_bot: false },
-                chat: { id: userId, type: 'private' },
-                message: { text: url, message_id: 0, from: { id: userId } },
-                reply: (text, extra) => bot.telegram.sendMessage(userId, text, extra),
-                telegram: bot.telegram,
-                answerCbQuery: () => Promise.resolve(),
-                replyWithPhoto: (p, e) => bot.telegram.sendPhoto(userId, p, e),
-                replyWithVideo: (v, e) => bot.telegram.sendVideo(userId, v, e),
-                replyWithAudio: (a, e) => bot.telegram.sendAudio(userId, a, e),
-            };
-
-            await handlers.handleMessage(mockCtx);
+            // Send to Telegram
+            await bot.telegram.sendMessage(userId, msg, { parse_mode: 'HTML' });
 
         } catch (e) {
-            console.error("Webhook Error:", e);
+            console.error("Debug Error:", e);
         }
     });
 
