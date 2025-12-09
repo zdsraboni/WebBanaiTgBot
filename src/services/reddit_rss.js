@@ -3,32 +3,33 @@ const db = require('../utils/db');
 const config = require('../config/settings');
 const handlers = require('../utils/handlers');
 
-const parser = new Parser();
+// ✅ FIX: ADD CUSTOM HEADERS TO BYPASS 403
+const parser = new Parser({
+    headers: {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+        'Accept': 'application/rss+xml, application/xml, text/xml'
+    }
+});
 
 const checkSaved = async (bot) => {
     const adminId = config.ADMIN_ID;
     const user = await db.getAdminConfig(adminId);
 
-    // 1. Check Config
     if (!user || !user.redditConfig || !user.redditConfig.isActive || !user.redditConfig.rssUrl) {
         return;
     }
 
     try {
-        // 2. Fetch RSS Feed
-        // Reddit feeds are public/tokenized, so standard fetch works
+        console.log(`👽 Reddit RSS: Checking feed...`);
         const feed = await parser.parseURL(user.redditConfig.rssUrl);
         
         if (!feed || !feed.items || feed.items.length === 0) return;
 
-        // 3. Sync Logic
-        // The first item in the feed is the newest
         const newestItem = feed.items[0];
-        const newestId = newestItem.id || newestItem.link; // Reddit RSS uses link as ID often
+        const newestId = newestItem.id || newestItem.link; 
         
         const lastId = user.redditConfig.lastPostId;
 
-        // First Run: Just save the ID to avoid spamming old saved posts
         if (!lastId) {
             console.log(`👽 Reddit RSS: First run sync. Marking ${newestId}`);
             await db.updateRedditLastId(adminId, newestId);
@@ -36,33 +37,28 @@ const checkSaved = async (bot) => {
             return;
         }
 
-        // Check if newest is actually new
         if (newestId === lastId) {
-            return; // No updates
+            console.log("💤 Reddit RSS: No new posts.");
+            return; 
         }
 
-        // 4. Find all new items (Filter those newer than lastId)
-        // RSS feed order: Newest [0] -> Oldest [n]
-        // We iterate and stop when we hit the lastId
         const newPosts = [];
         for (const item of feed.items) {
             const currentId = item.id || item.link;
-            if (currentId === lastId) break; // Reached known territory
-            newPosts.unshift(item); // Add to list (reversed to process oldest new first)
+            if (currentId === lastId) break; 
+            newPosts.unshift(item); 
         }
 
         if (newPosts.length > 0) {
             console.log(`🔥 Found ${newPosts.length} new Reddit posts.`);
             
-            // Process them
             for (const post of newPosts) {
                 const postUrl = post.link;
                 console.log(`👽 Processing Reddit: ${postUrl}`);
 
                 // Determine Target Chat
-                const targetId = user.twitterConfig.webhookTarget || adminId; // Reuse destination setting
+                const targetId = user.twitterConfig.webhookTarget || adminId;
 
-                // Mock Context
                 const mockCtx = {
                     from: { id: adminId, first_name: 'Admin' },
                     chat: { id: targetId },
@@ -77,27 +73,26 @@ const checkSaved = async (bot) => {
                     editMessageMedia: (m, e) => bot.telegram.sendVideo(targetId, m.media.source, { caption: m.caption, parse_mode: 'HTML' })
                 };
 
-                // Trigger Download
                 await handlers.handleMessage(mockCtx);
-                
-                // Delay to prevent flood
-                await new Promise(r => setTimeout(r, 3000));
+                await new Promise(r => setTimeout(r, 5000)); // 5s delay
             }
 
-            // Update DB with the newest ID we processed
             await db.updateRedditLastId(adminId, newestId);
         }
 
     } catch (e) {
         console.error("❌ Reddit RSS Error:", e.message);
+        // If it's still 403, the URL might be expired/wrong format
+        if (e.message.includes('403')) {
+             console.log("⚠️ Tip: Check if your RSS URL has '?feed=...' and '&user=...' parameters.");
+        }
     }
 };
 
 const init = (bot) => {
     console.log("🚀 Reddit RSS Engine Started");
     checkSaved(bot);
-    // Check every 2 minutes
-    setInterval(() => checkSaved(bot), 1 * 60 * 1000);
+    setInterval(() => checkSaved(bot), 2 * 60 * 1000);
 };
 
 module.exports = { init };
