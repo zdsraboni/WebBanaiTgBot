@@ -36,20 +36,16 @@ const handleStart = async (ctx) => {
 };
 
 const handleHelp = async (ctx) => {
-    const text = `📚 <b>Help Guide</b>\n\n<b>1. Downloads:</b> Send any valid link.\n<b>2. Custom Caption:</b> Add text after link.\n<b>3. Ghost Mention:</b> Reply + <code>/setnick name</code>.`;
+    const text = `📚 <b>Help Guide</b>\n\n<b>1. Downloads:</b> Send any valid link.\n<b>2. Custom Caption:</b> Add text after link.\n<b>3. Ghost Mention:</b> Reply + <code>/setnick name</code>.\n<b>4. Automation:</b> Use the Webhook API to send links silently.`;
     const buttons = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'start_msg')]]);
     if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
     else await ctx.reply(text, { parse_mode: 'HTML' });
 };
 
-// --- DOWNLOADER WITH REAL ERROR REPORTING ---
+// --- DOWNLOADER WITH SPLITTER ---
 const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionText, userMsgId) => {
     try {
-        // 1. Try Delete (Skip if message ID is 0/fake)
-        if (userMsgId && userMsgId !== 0) { 
-            try { await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId); } catch (err) {} 
-        }
-
+        if (userMsgId && userMsgId !== 0) { try { await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId); } catch (err) {} }
         await ctx.telegram.editMessageText(ctx.chat.id, botMsgId, null, `⏳ *Downloading...*`, { parse_mode: 'Markdown' });
 
         const timestamp = Date.now();
@@ -79,7 +75,6 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
             if (fs.existsSync(file)) fs.unlinkSync(file);
         }
 
-        // Stats Check (Fixes Webhook Crash)
         const userId = ctx.callbackQuery ? ctx.callbackQuery.from.id : (ctx.message ? ctx.message.from.id : null);
         if (userId) db.incrementDownloads(userId);
 
@@ -88,8 +83,6 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
 
     } catch (e) {
         console.error(`Download Error: ${e.message}`);
-        
-        // ✅ SHOW REAL ERROR TO USER
         let errorMsg = "❌ Error/Timeout.";
         if (e.message.includes('403')) errorMsg = "❌ Error: Forbidden (Cookies needed?)";
         if (e.message.includes('Sign in')) errorMsg = "❌ Error: Age/Login Restricted.";
@@ -125,10 +118,7 @@ const handleMessage = async (ctx) => {
         if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
             media = await twitterService.extract(fullUrl);
             platformName = 'Twitter';
-            // NSFW Fallback
-            if (!media) {
-                media = { title: 'Twitter Media', author: 'User', source: fullUrl, type: 'video', url: fullUrl };
-            }
+            if (!media) media = { title: 'Twitter Media', author: 'User', source: fullUrl, type: 'video', url: fullUrl };
         } else if (fullUrl.includes('reddit.com')) {
             media = await redditService.extract(fullUrl);
             platformName = 'Reddit';
@@ -145,15 +135,43 @@ const handleMessage = async (ctx) => {
 
         const prettyCaption = generateCaption(postText || media.title, platformName, media.source, flagEmoji);
 
-        if (media.type === 'video') {
-            return await performDownload(ctx, media.url || media.source, false, 'best', msg.message_id, prettyCaption, ctx.message.message_id);
-        }
-
+        // --- ✅ NEW LOGIC: ALWAYS SHOW BUTTONS FOR VIDEO ---
         const buttons = [];
-        if (media.type === 'gallery') buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
-        else if (media.type === 'image') buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
+        let previewText = `✅ ${flagEmoji} *${(media.title || 'Media').substring(0, 50)}...*`;
+
+        if (media.type === 'gallery') {
+            previewText += `\n📚 **Gallery Detected**`;
+            buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
+        } 
+        else if (media.type === 'image') {
+            previewText += `\n🖼 **Image Detected**`;
+            buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
+        }
+        else if (media.type === 'video') {
+            previewText += `\n📹 **Video Detected**`;
+            
+            // Add Resolution Buttons (If available)
+            if (media.formats && media.formats.length > 0) {
+                const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height);
+                const seen = new Set();
+                formats.slice(0, 5).forEach(f => {
+                    if(!seen.has(f.height)) { 
+                        seen.add(f.height); 
+                        buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]); 
+                    }
+                });
+            }
+            
+            // Standard Buttons (Always visible)
+            buttons.push([Markup.button.callback("📹 Download Video (Best)", "vid|best")]);
+            buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
+        }
         
-        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, `✅ ${flagEmoji} *${(media.title || 'Media').substring(0, 50)}...*`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+        await ctx.telegram.editMessageText(
+            ctx.chat.id, msg.message_id, null, 
+            `${previewText}\n👤 Author: ${media.author}\nSource: [Link](${media.source})`, 
+            { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
+        );
 
     } catch (e) {
         await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed: " + e.message);
@@ -211,4 +229,5 @@ const handleCallback = async (ctx) => {
     else await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, null, null);
 };
 
+// EXPORT performDownload FOR WEB SERVER
 module.exports = { handleMessage, handleCallback, handleGroupMessage, handleStart, handleHelp, performDownload };
