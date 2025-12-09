@@ -1,7 +1,7 @@
-FROM node:18-alpine
+FROM node:18
 
-# Install Python & FFmpeg for yt-dlp
-RUN apk add --no-cache python3 py3-pip ffmpeg
+# Install Python & FFmpeg (Debian version)
+RUN apt-get update && apt-get install -y python3 python3-pip ffmpeg
 
 # Install yt-dlp globally
 RUN python3 -m pip install --upgrade pip --break-system-packages \
