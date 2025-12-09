@@ -7,51 +7,67 @@ const checkLikes = async (bot) => {
     const adminId = config.ADMIN_ID;
     const user = await db.getAdminConfig(adminId);
 
-    // 1. Check if Mode is API
-    if (!user || user.twitterConfig.mode !== 'api' || !user.twitterConfig.apiKey) {
-        return; // Silent exit if mode is webhook or off
+    // 1. Check Config
+    if (!user || user.twitterConfig.mode !== 'api') {
+        // console.log("💤 Poller: Sleeping (Webhook Mode)"); // Uncomment if you want spam
+        return;
+    }
+    if (!user.twitterConfig.apiKey || !user.twitterConfig.targetHandle) {
+        console.log("❌ Poller: Missing API Key or Handle.");
+        return;
     }
 
+    console.log(`🕵️ Poller: Checking @${user.twitterConfig.targetHandle}...`);
+
     try {
-        // 2. Call API (Fetch last 5 likes)
+        // 2. Call API
         const response = await axios.get(`https://api.twitterapi.io/twitter/user/last_likes`, {
             params: { userName: user.twitterConfig.targetHandle },
             headers: { 'X-API-Key': user.twitterConfig.apiKey }
         });
 
-        // Note: Structure depends on API. Usually returns { likes: [...] } or just array
-        // We handle generic response. Assuming it returns list of tweets.
-        const tweets = response.data.likes || response.data.tweets || [];
-        if (tweets.length === 0) return;
-
-        // 3. Process IDs
-        const lastIdStr = user.twitterConfig.lastLikedId || "0";
-        const lastId = BigInt(lastIdStr);
+        // 3. Validate Response
+        // API often returns { tweets: [...] } OR { likes: [...] }
+        const tweets = response.data.tweets || response.data.likes || [];
         
-        // Safety: Sort tweets from Oldest -> Newest
-        tweets.sort((a, b) => (BigInt(a.id) > BigInt(b.id) ? 1 : -1));
-
-        // Get the absolute newest ID from this batch
-        const newestInBatch = tweets[tweets.length - 1].id;
-
-        // **FIRST RUN CHECK**: If we never ran before, just save the newest ID and skip download.
-        // This prevents downloading 20 old posts instantly.
-        if (lastId === 0n) {
-            console.log(`✨ First Run: Marking ${newestInBatch} as start point.`);
-            await db.updateLastId(adminId, newestInBatch);
+        if (!Array.isArray(tweets)) {
+            console.log("⚠️ Poller: Unexpected API format:", response.data);
             return;
         }
 
-        // 4. Filter & Download
-        let foundNew = false;
-        for (const tweet of tweets) {
-            // Only process if this tweet is NEWER than what we have seen
-            if (BigInt(tweet.id) > lastId) {
-                foundNew = true;
-                const tweetUrl = `https://twitter.com/${user.twitterConfig.targetHandle}/status/${tweet.id}`;
-                console.log(`🔥 New Like Detected: ${tweetUrl}`);
+        if (tweets.length === 0) {
+            console.log("💤 Poller: No likes found (API returned empty list).");
+            return;
+        }
 
-                // Create Mock Context
+        // 4. Process Tweets
+        const lastIdStr = user.twitterConfig.lastLikedId || "0";
+        const lastId = BigInt(lastIdStr);
+        
+        // Sort Old -> New
+        tweets.sort((a, b) => (BigInt(a.id) > BigInt(b.id) ? 1 : -1));
+        const newestInBatch = tweets[tweets.length - 1].id;
+
+        console.log(`📊 Poller: LastDB=${lastIdStr} | NewestAPI=${newestInBatch}`);
+
+        // FIRST RUN CHECK
+        if (lastId === 0n) {
+            console.log(`✨ First Run Sync: Setting start point to ${newestInBatch}`);
+            await db.updateLastId(adminId, newestInBatch);
+            // Optional: Send test message to confirm connection
+            await bot.telegram.sendMessage(adminId, `✅ <b>API Connected!</b>\nSynced with latest like ID: <code>${newestInBatch}</code>\nWaiting for NEW likes...`, { parse_mode: 'HTML' });
+            return;
+        }
+
+        // FILTER NEW
+        let newCount = 0;
+        for (const tweet of tweets) {
+            if (BigInt(tweet.id) > lastId) {
+                newCount++;
+                const tweetUrl = `https://twitter.com/${user.twitterConfig.targetHandle}/status/${tweet.id}`;
+                console.log(`🔥 Sending New Like: ${tweetUrl}`);
+
+                // Send to Bot
                 const mockCtx = {
                     from: { id: adminId, first_name: 'Admin', is_bot: false },
                     chat: { id: adminId, type: 'private' },
@@ -65,29 +81,32 @@ const checkLikes = async (bot) => {
                     replyWithDocument: (d, e) => bot.telegram.sendDocument(adminId, d, e),
                 };
 
-                // Trigger Bot
                 await handlers.handleMessage(mockCtx);
-                
-                // Small delay to be safe
                 await new Promise(r => setTimeout(r, 2000));
             }
         }
 
-        // 5. Update DB with newest ID (only if we found something new)
-        if (foundNew) {
+        if (newCount > 0) {
+            console.log(`✅ Processed ${newCount} new tweets.`);
             await db.updateLastId(adminId, newestInBatch);
+        } else {
+            console.log("💤 No *new* tweets found since last check.");
         }
 
     } catch (e) {
         console.error("❌ Poller Error:", e.message);
+        // If API Key is wrong/expired, warn user
+        if (e.response && e.response.status === 401) {
+            await bot.telegram.sendMessage(adminId, "⚠️ <b>API Error:</b> Unauthorized. Check your API Key.", { parse_mode: 'HTML' });
+        }
     }
 };
 
 const init = (bot) => {
-    console.log("🚀 Polling Engine Started (1 min interval)");
-    // Run once on start
+    console.log("🚀 Polling Engine Started");
+    // Initial Check
     checkLikes(bot);
-    // Run every 60 seconds (1 minute)
+    // Loop
     setInterval(() => checkLikes(bot), 60 * 1000);
 };
 
