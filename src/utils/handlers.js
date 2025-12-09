@@ -108,6 +108,20 @@ const handleMessage = async (ctx) => {
         if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
             media = await twitterService.extract(fullUrl);
             platformName = 'Twitter';
+            
+            // ✅ THE FIX: FALLBACK FOR NSFW/SENSITIVE TWEETS
+            // If the public API fails (returns null), we force the downloader to try anyway.
+            if (!media) {
+                console.log("⚠️ Twitter API failed (likely NSFW). Switching to Brute Force.");
+                media = { 
+                    title: 'Twitter Media (NSFW/Restricted)', 
+                    author: 'Twitter User', 
+                    source: fullUrl, 
+                    type: 'video', 
+                    url: fullUrl // This sends the raw URL to yt-dlp
+                };
+            }
+
         } else if (fullUrl.includes('reddit.com')) {
             media = await redditService.extract(fullUrl);
             platformName = 'Reddit';
@@ -191,5 +205,4 @@ const handleCallback = async (ctx) => {
     else await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, null, null);
 };
 
-// ✅ EXPORT performDownload SO THE WEB SERVER CAN USE IT
 module.exports = { handleMessage, handleCallback, handleGroupMessage, handleStart, handleHelp, performDownload };
