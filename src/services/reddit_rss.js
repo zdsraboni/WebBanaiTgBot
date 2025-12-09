@@ -97,7 +97,7 @@ const init = (bot) => {
     console.log("🚀 Reddit RSS Engine Started");
     checkSaved(bot);
     // Check every 2 minutes
-    setInterval(() => checkSaved(bot), 2 * 60 * 1000);
+    setInterval(() => checkSaved(bot), 1 * 60 * 1000);
 };
 
 module.exports = { init };
