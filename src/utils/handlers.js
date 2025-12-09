@@ -81,7 +81,7 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
         await ctx.telegram.deleteMessage(ctx.chat.id, botMsgId).catch(() => {});
 
     } catch (e) {
-        console.error(`Download Error: ${e.message}`);
+        console.error(e);
         let errorMsg = "❌ Error/Timeout.";
         if (e.message.includes('403')) errorMsg = "❌ Error: Forbidden (Cookies needed?)";
         if (e.message.includes('Sign in')) errorMsg = "❌ Error: Age/Login Restricted.";
@@ -112,89 +112,82 @@ const handleMessage = async (ctx) => {
         let media = null;
         let platformName = 'Social';
 
-        // --- PLATFORM DETECTION ---
+        // 1. Identify Platform
         if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
             media = await twitterService.extract(fullUrl);
             platformName = 'Twitter';
-            // NSFW Fallback Logic
-            if (!media) {
-                // Try to get info (and THUMBNAIL) via yt-dlp directly
-                try {
-                    const info = await downloader.getInfo(fullUrl);
-                    media = { 
-                        title: info.title || 'Twitter Media', 
-                        author: info.uploader || 'Twitter User', 
-                        source: fullUrl, 
-                        type: 'video', 
-                        url: fullUrl, 
-                        thumbnail: info.thumbnail // ✅ GET THUMBNAIL HERE
-                    };
-                } catch (e) {
-                    // Total fallback if everything fails
-                    media = { title: 'Twitter Media', author: 'User', source: fullUrl, type: 'video', url: fullUrl };
-                }
-            }
         } else if (fullUrl.includes('reddit.com')) {
             media = await redditService.extract(fullUrl);
             platformName = 'Reddit';
         } else {
-            // Instagram / TikTok Logic
             if (fullUrl.includes('instagram.com')) platformName = 'Instagram';
             if (fullUrl.includes('tiktok.com')) platformName = 'TikTok';
-            try {
-                const info = await downloader.getInfo(fullUrl);
-                media = { 
-                    title: info.title || 'Video', 
-                    author: info.uploader || 'User', 
-                    source: fullUrl, 
-                    type: 'video', 
-                    url: fullUrl,
-                    thumbnail: info.thumbnail, // ✅ GET THUMBNAIL HERE
-                    formats: info.formats || [] 
-                };
-            } catch (e) { media = { title: 'Video', author: 'User', source: fullUrl, type: 'video', formats: [] }; }
         }
 
-        if (!media) throw new Error("Media not found");
+        // 2. FALLBACK & THUMBNAIL FETCH (Crucial for NSFW)
+        // If normal extraction failed OR we don't have a thumbnail, force yt-dlp to get one
+        if (!media || !media.thumbnail) {
+            try {
+                // We use yt-dlp to get metadata (including thumbnail)
+                const info = await downloader.getInfo(fullUrl);
+                media = {
+                    title: info.title || 'Social Video',
+                    author: info.uploader || 'User',
+                    source: fullUrl,
+                    type: 'video',
+                    url: fullUrl,
+                    thumbnail: info.thumbnail, // ✅ Get Real Thumbnail
+                    formats: info.formats || []
+                };
+            } catch (e) {
+                // Only if everything fails
+                if (!media) throw new Error("Media not found");
+            }
+        }
 
         const prettyCaption = generateCaption(postText || media.title, platformName, media.source, flagEmoji);
 
-        // --- PREVIEW MESSAGE ---
+        // 3. GENERATE BUTTONS
         const buttons = [];
-        // Video Buttons
-        if (media.type === 'video') {
+        let previewText = `✅ ${flagEmoji} *${(media.title || 'Media').substring(0, 50)}...*`;
+
+        if (media.type === 'gallery') {
+            previewText += `\n📚 **Gallery Detected**`;
+            buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
+        } 
+        else if (media.type === 'image') {
+            previewText += `\n🖼 **Image Detected**`;
+            buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
+        }
+        else if (media.type === 'video') {
+            previewText += `\n📹 **Video Detected**`;
             if (media.formats && media.formats.length > 0) {
                 const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height);
                 const seen = new Set();
                 formats.slice(0, 5).forEach(f => {
-                    if(!seen.has(f.height)) { 
-                        seen.add(f.height); 
-                        buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]); 
-                    }
+                    if(!seen.has(f.height)) { seen.add(f.height); buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]); }
                 });
             }
             buttons.push([Markup.button.callback("📹 Download Video (Best)", "vid|best")]);
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
-        // Gallery/Image Buttons
-        else if (media.type === 'gallery') buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
-        else if (media.type === 'image') buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
-
-        // ✅ SEND WITH THUMBNAIL (IF EXISTS)
-        // If we found a thumbnail via yt-dlp, send a Photo message.
-        // If not, fall back to Text message.
+        
+        // 4. SEND RESPONSE (With Image if possible)
         if (media.thumbnail) {
-            await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(()=>{}); // Delete "Analyzing"
+            // Delete "Analyzing..." text
+            await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(()=>{});
+            
+            // Send Photo Message with Buttons
             await ctx.replyWithPhoto(media.thumbnail, { 
                 caption: prettyCaption, 
                 parse_mode: 'HTML', 
                 ...Markup.inlineKeyboard(buttons) 
             });
         } else {
-            // Old text-only way (Fallback)
+            // Fallback to Text if no thumbnail found
             await ctx.telegram.editMessageText(
                 ctx.chat.id, msg.message_id, null, 
-                `${prettyCaption}`, // Use the pretty caption here too
+                `${prettyCaption}`, 
                 { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) }
             );
         }
