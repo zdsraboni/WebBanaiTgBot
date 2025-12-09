@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../config/settings');
 const { translate } = require('google-translate-api-x');
-const db = require('./db'); // Import DB
+const db = require('./db');
 
 const { resolveRedirect } = require('./helpers'); 
 const downloader = require('./downloader');
@@ -28,6 +28,76 @@ const getTranslationButtons = () => {
         Markup.button.callback('🇺🇸 English', 'trans|en'),
         Markup.button.callback('🇧🇩 Bangla', 'trans|bn')
     ]]);
+};
+
+// --- START & HELP HANDLERS (PROFESSIONAL UI) ---
+const handleStart = async (ctx) => {
+    if (ctx.from) db.addUser(ctx.from.id);
+    
+    const text = `
+👋 <b>Welcome to Media Banai!</b>
+
+I am a professional media downloader bot. 
+I can download high-quality videos and images from:
+• 🐦 <b>Twitter / X</b>
+• 👽 <b>Reddit</b>
+
+<b>🚀 Features:</b>
+• 🎬 Auto-Download (Highest Quality)
+• 🗣 Smart Translation (Eng/Ban)
+• 👻 Ghost Mentions (Group Nicknames)
+• 📝 Custom Captions & Flags
+
+<i>Just send me a link to get started!</i>
+    `.trim();
+
+    const buttons = Markup.inlineKeyboard([
+        [Markup.button.callback('📚 How to Use', 'help_msg'), Markup.button.callback('📊 Bot Stats', 'stats_msg')],
+        [Markup.button.url('📣 Updates Channel', 'https://t.me/MediaBanaiUpdates')] // Replace with your channel or remove
+    ]);
+
+    // If called via callback (Back button), edit message. Else send new.
+    if (ctx.callbackQuery) {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
+    } else {
+        await ctx.reply(text, { parse_mode: 'HTML', ...buttons });
+    }
+};
+
+const handleHelp = async (ctx) => {
+    const text = `
+📚 <b>Media Banai Help Guide</b>
+
+<b>1. 📥 Downloading Media</b>
+Simply send any valid link from Twitter(X) or Reddit.
+• I will analyze it and provide download buttons.
+• If "Quality Check" fails, I auto-download the best version.
+
+<b>2. 📝 Custom Captions</b>
+• Write text after the link to set a custom caption.
+• <i>Ex:</i> <code>https://x.com/post Wow this is cool!</code>
+• Add country code (us, bd, in) before link for flags.
+• <i>Ex:</i> <code>bd https://x.com/post</code>
+
+<b>3. 👻 Ghost Mentions (Groups)</b>
+<i>(Reply to a user in a group)</i>
+• <code>/setnick bro</code> - Saves "bro" for that user.
+• Type <b>bro</b> - Bot deletes text & tags user.
+• <code>/delnick bro</code> - Deletes nickname.
+
+<b>4. 🗣 Translation</b>
+• Use the 🇺🇸/🇧🇩 buttons below media to translate captions.
+    `.trim();
+
+    const buttons = Markup.inlineKeyboard([
+        [Markup.button.callback('⬅️ Back to Menu', 'start_msg')]
+    ]);
+
+    if (ctx.callbackQuery) {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
+    } else {
+        await ctx.reply(text, { parse_mode: 'HTML' });
+    }
 };
 
 // --- SHARED DOWNLOAD FUNCTION ---
@@ -66,8 +136,7 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
         if (isAudio) await ctx.replyWithAudio({ source: finalFile }, extraOptions);
         else await ctx.replyWithVideo({ source: finalFile }, extraOptions);
 
-        // TRACKING: Increment Download Count
-        db.incrementDownloads();
+        db.incrementDownloads(); // Track stats
 
         console.log(`✅ Upload Success: ${url}`);
         await ctx.telegram.deleteMessage(ctx.chat.id, botMsgId).catch(() => {});
@@ -83,7 +152,6 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
 
 // --- MESSAGE HANDLER ---
 const handleMessage = async (ctx) => {
-    // TRACKING: Add User to DB
     if (ctx.from && ctx.from.id) db.addUser(ctx.from.id);
 
     const messageText = ctx.message.text;
@@ -165,63 +233,78 @@ const handleMessage = async (ctx) => {
     }
 };
 
-// --- ADMIN HANDLER (THIS WAS MISSING!) ---
-const handleAdmin = async (ctx) => {
-    // Security Check
-    if (String(ctx.from.id) !== String(config.ADMIN_ID)) return;
-
-    const command = ctx.message.text.split(' ')[0];
-
-    // 1. /stats
-    if (command === '/stats') {
-        const stats = await db.getStats(); // Await because DB is async now
-        return ctx.reply(
-            `📊 <b>Media Banai Stats</b>\n\n` +
-            `👤 <b>Total Users:</b> ${stats.users}\n` +
-            `⬇️ <b>Total Downloads:</b> ${stats.downloads}\n` +
-            `🟢 <b>Server:</b> Online`,
-            { parse_mode: 'HTML' }
-        );
+// --- GROUP HANDLER ---
+const handleGroupMessage = async (ctx, next) => {
+    const messageText = ctx.message.text;
+    
+    if (messageText && messageText.startsWith('/setnick')) {
+        const parts = messageText.split(' ');
+        if (parts.length < 2) return ctx.reply("⚠️ Usage: Reply to a user and type: /setnick <name>");
+        const nickName = parts[1].toLowerCase();
+        if (!ctx.message.reply_to_message) return ctx.reply("⚠️ You must reply to the user you want to nickname.");
+        
+        await db.setNickname(ctx.chat.id, nickName, ctx.message.reply_to_message.from.id);
+        return ctx.reply(`✅ Nickname set! Type <b>${nickName}</b> to mention user.`, { parse_mode: 'HTML' });
     }
 
-    // 2. /broadcast <message>
+    if (messageText && messageText.startsWith('/delnick')) {
+        const parts = messageText.split(' ');
+        if (parts.length < 2) return;
+        await db.deleteNickname(ctx.chat.id, parts[1]);
+        return ctx.reply(`🗑 Nickname '${parts[1]}' deleted.`);
+    }
+
+    if (messageText) {
+        const cleanText = messageText.trim().toLowerCase();
+        const nickEntry = await db.getNickname(ctx.chat.id, cleanText);
+        if (nickEntry) {
+            try { await ctx.deleteMessage(); } catch (e) {}
+            await ctx.reply(`👋 <b>${ctx.from.first_name}</b> mentioned <a href="tg://user?id=${nickEntry.targetId}">User</a>`, { parse_mode: 'HTML' });
+            return; 
+        }
+    }
+    return next();
+};
+
+// --- ADMIN HANDLER ---
+const handleAdmin = async (ctx) => {
+    if (String(ctx.from.id) !== String(config.ADMIN_ID)) return;
+    const command = ctx.message.text.split(' ')[0];
+
+    if (command === '/stats') {
+        const stats = await db.getStats();
+        return ctx.reply(`📊 <b>Stats</b>\n👤 Users: ${stats.users}\n⬇️ Downloads: ${stats.downloads}`, { parse_mode: 'HTML' });
+    }
     if (command === '/broadcast') {
         const message = ctx.message.text.replace('/broadcast', '').trim();
-        if (!message) return ctx.reply("⚠️ Usage: /broadcast [Your Message]");
-
+        if (!message) return ctx.reply("⚠️ Usage: /broadcast [Message]");
         const users = await db.getAllUsers();
-        let success = 0;
-        let blocked = 0;
-
-        await ctx.reply(`📢 Starting broadcast to ${users.length} users...`);
-
-        for (const userId of users) {
-            try {
-                await ctx.telegram.sendMessage(userId, `📢 <b>Admin Announcement</b>\n\n${message}`, { parse_mode: 'HTML' });
-                success++;
-                await new Promise(r => setTimeout(r, 50)); 
-            } catch (e) {
-                blocked++;
-            }
-        }
-
-        return ctx.reply(`✅ Broadcast Complete.\n\nSent: ${success}\nFailed/Blocked: ${blocked}`);
+        await ctx.reply(`📢 Sending to ${users.length} users...`);
+        let s = 0;
+        for (const u of users) { try { await ctx.telegram.sendMessage(u, message); s++; } catch(e){} }
+        return ctx.reply(`✅ Sent to ${s} users.`);
     }
 };
 
 // --- CALLBACK HANDLER ---
 const handleCallback = async (ctx) => {
     if (ctx.from && ctx.from.id) db.addUser(ctx.from.id);
-
     const data = ctx.callbackQuery.data;
     const [action, id] = data.split('|');
     
-    // --- TRANSLATE ---
+    // UI NAVIGATION
+    if (action === 'help_msg') return handleHelp(ctx);
+    if (action === 'start_msg') return handleStart(ctx);
+    if (action === 'stats_msg') {
+        const stats = await db.getStats();
+        return ctx.answerCbQuery(`📊 Users: ${stats.users} | Downloads: ${stats.downloads}`, { show_alert: true });
+    }
+
+    // TRANSLATE
     if (action === 'trans') {
         const targetLang = id; 
         const messageCaption = ctx.callbackQuery.message.caption;
         if (!messageCaption) return ctx.answerCbQuery("No text.");
-
         await ctx.answerCbQuery(targetLang === 'bn' ? "🇧🇩 Translating..." : "🇺🇸 Translating...");
 
         let currentFlag = '🇧🇩'; 
@@ -251,7 +334,7 @@ const handleCallback = async (ctx) => {
         return;
     }
 
-    // --- DOWNLOAD ---
+    // DOWNLOAD
     const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
     if (!url) return ctx.answerCbQuery("❌ Link expired.");
 
@@ -310,5 +393,4 @@ const handleCallback = async (ctx) => {
     }
 };
 
-// EXPORT ALL HANDLERS
-module.exports = { handleMessage, handleCallback, handleAdmin };
+module.exports = { handleMessage, handleCallback, handleAdmin, handleGroupMessage, handleStart, handleHelp };
