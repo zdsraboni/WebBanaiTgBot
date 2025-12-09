@@ -1,22 +1,16 @@
 const { Telegraf } = require('telegraf');
 const fs = require('fs');
-
-// Imports
 const config = require('./src/config/settings');
 const logger = require('./src/utils/logger');
 const db = require('./src/utils/db');
 
-// Services
-const poller = require('./src/services/poller'); // ✅ The New API Engine
-
-// Handlers
+// Imports
 const { 
     handleMessage, 
     handleCallback, 
     handleGroupMessage, 
     handleStart, 
-    handleHelp, 
-    handleConfig // ✅ The New Config Handler
+    handleHelp 
 } = require('./src/utils/handlers');
 
 const { handleStats, handleBroadcast } = require('./src/utils/admin'); 
@@ -36,13 +30,9 @@ const bot = new Telegraf(config.BOT_TOKEN);
 bot.start(handleStart);
 bot.help(handleHelp);
 
-// Admin Stats
+// Admin Commands
 bot.command('stats', handleStats);
 bot.command('broadcast', handleBroadcast);
-
-// API Configuration (TwitterAPI.io)
-bot.command('setup_api', handleConfig);
-bot.command('mode', handleConfig);
 
 // --- MESSAGE LOGIC ---
 bot.on('text', async (ctx, next) => {
@@ -58,13 +48,9 @@ bot.on('text', async (ctx, next) => {
 // --- CALLBACKS (Buttons) ---
 bot.on('callback_query', handleCallback);
 
-// --- START SERVICES ---
-// Start the Twitter Polling Engine (Runs every 1 min)
-poller.init(bot);
-
 // Graceful Stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
-// Start Web Server (IFTTT Webhook + Hacker Terminal)
+// Start Web Server (The Webhook Listener)
 setupServer(bot);
