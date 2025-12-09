@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const config = require('../config/settings');
 
-// 1. Updated Schema with 'webhookTarget'
+// 1. Updated Schema
 const UserSchema = new mongoose.Schema({
     id: { type: String, unique: true },
     username: { type: String },
@@ -9,14 +9,20 @@ const UserSchema = new mongoose.Schema({
     downloads: { type: Number, default: 0 },
     joinedAt: { type: Date, default: Date.now },
     
-    // Configuration
+    // Twitter Config
     twitterConfig: {
         mode: { type: String, default: 'webhook' }, 
         apiKey: { type: String, default: '' },
         targetHandle: { type: String, default: '' },
         lastLikedId: { type: String, default: '0' },
-        // ✅ NEW: Where to send webhook messages? (Default: Admin Private Chat)
         webhookTarget: { type: String, default: '' } 
+    },
+
+    // ✅ NEW: Reddit RSS Config
+    redditConfig: {
+        rssUrl: { type: String, default: '' },     // Your private saved feed URL
+        lastPostId: { type: String, default: '' }, // Last post we processed
+        isActive: { type: Boolean, default: false }
     }
 });
 
@@ -61,32 +67,38 @@ const getAdminConfig = async (adminId) => {
     return await User.findOne({ id: String(adminId) });
 };
 
-// ✅ NEW: Set the Destination
-const setWebhookTarget = async (adminId, targetId) => {
-    return await User.findOneAndUpdate(
-        { id: String(adminId) },
-        { 'twitterConfig.webhookTarget': String(targetId) },
-        { new: true }
-    );
-};
-
-const updateApiConfig = async (adminId, apiKey, handle) => {
+// Reddit Config
+const updateRedditConfig = async (adminId, rssUrl) => {
+    // Reset last ID to trigger first-run sync
     return await User.findOneAndUpdate(
         { id: String(adminId) },
         { 
-            'twitterConfig.apiKey': apiKey,
-            'twitterConfig.targetHandle': handle,
-            'twitterConfig.mode': 'api',
-            'twitterConfig.lastLikedId': '0' 
+            'redditConfig.rssUrl': rssUrl,
+            'redditConfig.isActive': true,
+            'redditConfig.lastPostId': '' 
         },
         { new: true }
     );
 };
 
+const updateRedditLastId = async (adminId, postId) => {
+    await User.updateOne({ id: String(adminId) }, { 'redditConfig.lastPostId': postId });
+};
+
+const toggleRedditMode = async (adminId, isActive) => {
+    await User.updateOne({ id: String(adminId) }, { 'redditConfig.isActive': isActive });
+};
+
+// Twitter Config
+const setWebhookTarget = async (adminId, targetId) => {
+    return await User.findOneAndUpdate({ id: String(adminId) }, { 'twitterConfig.webhookTarget': String(targetId) }, { new: true });
+};
+const updateApiConfig = async (adminId, apiKey, handle) => {
+    return await User.findOneAndUpdate({ id: String(adminId) }, { 'twitterConfig.apiKey': apiKey, 'twitterConfig.targetHandle': handle, 'twitterConfig.mode': 'api', 'twitterConfig.lastLikedId': '0' }, { new: true });
+};
 const updateLastId = async (adminId, tweetId) => {
     await User.updateOne({ id: String(adminId) }, { 'twitterConfig.lastLikedId': tweetId });
 };
-
 const toggleMode = async (adminId, mode) => {
     await User.updateOne({ id: String(adminId) }, { 'twitterConfig.mode': mode });
 };
@@ -108,20 +120,17 @@ const getDetailedStats = async () => {
 };
 
 const getAllUsers = async () => {
-    try {
-        const users = await User.find({}, 'id');
-        return users.map(u => u.id);
-    } catch (e) { return []; }
+    try { const users = await User.find({}, 'id'); return users.map(u => u.id); } catch (e) { return []; }
 };
 
-const setNickname = async (groupId, name, targetId) => {
-    await Nickname.findOneAndUpdate({ name: name.toLowerCase(), groupId: String(groupId) }, { targetId: String(targetId) }, { upsert: true, new: true });
-};
+const setNickname = async (groupId, name, targetId) => { await Nickname.findOneAndUpdate({ name: name.toLowerCase(), groupId: String(groupId) }, { targetId: String(targetId) }, { upsert: true, new: true }); };
 const getNickname = async (groupId, name) => { return await Nickname.findOne({ name: name.toLowerCase(), groupId: String(groupId) }); };
 const deleteNickname = async (groupId, name) => { return await Nickname.deleteOne({ name: name.toLowerCase(), groupId: String(groupId) }); };
 
 module.exports = { 
     connect, addUser, incrementDownloads, getDetailedStats, getAllUsers, 
     setNickname, getNickname, deleteNickname,
-    getAdminConfig, updateApiConfig, updateLastId, toggleMode, setWebhookTarget 
+    getAdminConfig, setWebhookTarget,
+    updateApiConfig, updateLastId, toggleMode,
+    updateRedditConfig, updateRedditLastId, toggleRedditMode // ✅ Exported
 };
