@@ -33,6 +33,14 @@ bot.command('mode', handleConfig);
 bot.command('set_destination', handleConfig);
 bot.command('setup_reddit', handleConfig); // ✅ Add Command
 
+
+// ✅ REDDIT COMMANDS
+bot.command('setup_reddit', handleConfig);
+bot.command('reddit_on', handleConfig);
+bot.command('reddit_off', handleConfig);
+bot.command('reddit_interval', handleConfig);
+
+
 // Logic
 bot.on('text', async (ctx, next) => {
     if (await handleEditCaption(ctx)) return;
