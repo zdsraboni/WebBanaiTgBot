@@ -1,6 +1,7 @@
-FROM node:18
+# Use Debian (Stable) instead of Alpine (Buggy)
+FROM node:18-bullseye
 
-# Install Python & FFmpeg (Debian version)
+# Install Python & FFmpeg
 RUN apt-get update && apt-get install -y python3 python3-pip ffmpeg
 
 # Install yt-dlp globally
