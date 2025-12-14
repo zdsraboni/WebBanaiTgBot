@@ -14,8 +14,11 @@ const {
     handleGroupMessage, 
     handleStart, 
     handleHelp, 
-    handleConfig,
-    handleEditCaption,handleRun, handleLogin, handleConfig // ✅ Import new handler
+    handleConfig,      // <--- Only listed ONCE
+    handleEditCaption, 
+    handleForward, 
+    handleRun,         // <--- New
+    handleLogin        // <--- New
 } = require('./src/utils/handlers');
 
 const { handleStats, handleBroadcast } = require('./src/utils/admin'); 
