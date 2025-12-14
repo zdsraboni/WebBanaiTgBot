@@ -1,3 +1,5 @@
+const { spawn } = require('child_process');
+const path = require('path');
 const { Markup } = require('telegraf');
 const fs = require('fs');
 const path = require('path');
@@ -304,7 +306,51 @@ const handleCallback = async (ctx) => {
     else await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, ctx.callbackQuery.message.caption, null);
 };
 
+// --- NEW: RUN PYTHON SCRIPT (/run autoforward) ---
+let pythonProcess = null;
+
+const handleRun = async (ctx) => {
+    // 1. Security Check (Only Admin)
+    if (String(ctx.from.id) !== String(config.ADMIN_ID)) return;
+
+    const text = ctx.message.text.trim(); 
+
+    // 2. Check Command Syntax
+    if (!text.includes('autoforward')) {
+        return ctx.reply("⚠️ Usage: <code>/run autoforward</code>", { parse_mode: 'HTML' });
+    }
+
+    // 3. Prevent Double Running
+    if (pythonProcess) {
+        return ctx.reply("⚠️ The script is <b>already running</b>!", { parse_mode: 'HTML' });
+    }
+
+    await ctx.reply("🚀 <b>Starting Autoforward Script...</b>\nPath: <code>autoforward/main.py</code>", { parse_mode: 'HTML' });
+
+    // 4. Define Path
+    // Go up 2 levels from 'src/utils' to root, then into 'autoforward'
+    const scriptPath = path.join(__dirname, '../../autoforward/main.py');
+
+    // 5. Execute Python
+    // We set PORT to 8081 so it doesn't crash your main bot (which uses 10000/8080)
+    pythonProcess = spawn('python3', [scriptPath], {
+        env: { ...process.env, PORT: '8081' } 
+    });
+
+    // Log Output
+    pythonProcess.stdout.on('data', (data) => console.log(`🐍 [Autoforward]: ${data}`));
+    pythonProcess.stderr.on('data', (data) => console.error(`🐍 [Error]: ${data}`));
+
+    // Handle Stop
+    pythonProcess.on('close', (code) => {
+        console.log(`🐍 Stopped. Code: ${code}`);
+        pythonProcess = null;
+        ctx.reply(`⚠️ <b>Autoforward Stopped</b> (Code: ${code})`, { parse_mode: 'HTML' });
+    });
+};
+
+
 // Export ALL handlers
 module.exports = { 
-    handleMessage, handleCallback, handleGroupMessage, handleStart, handleHelp, performDownload, handleConfig, handleEditCaption 
+    handleMessage, handleCallback, handleGroupMessage, handleStart, handleHelp, performDownload, handleConfig, handleEditCaption, handleForward, handleRun
 };
