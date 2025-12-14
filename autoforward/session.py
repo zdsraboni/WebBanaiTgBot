@@ -1,17 +1,26 @@
+import os
+import sys
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
 
-# YOUR CREDENTIALS
-api_id = 38622204
-api_hash = 'd1da3bccca8184f39121e020c9b9dd44'
+# ✅ READ FROM ENV (Injected by Node.js Bot)
+api_id = os.environ.get('API_ID')
+api_hash = os.environ.get('API_HASH')
+
+if not api_id or not api_hash:
+    print("Error: API_ID or API_HASH missing in environment.")
+    sys.exit(1)
 
 print("--- TELEGRAM SESSION GENERATOR ---")
-print("Logging in...")
+print("Logging in... (Check Telegram Bot for prompts)")
 
-with TelegramClient(StringSession(), api_id, api_hash) as client:
+# Interactive Login
+# When this runs, Telethon asks for phone number on STDIN.
+# Node.js will pipe your Telegram message to this STDIN.
+with TelegramClient(StringSession(), int(api_id), api_hash) as client:
     session_string = client.session.save()
+    
+    # OUTPUT ONLY THE SESSION STRING AT THE END
     print("\n✅ LOGIN SUCCESSFUL!")
-    print("\n👇 COPY THIS LONG CODE BELOW (ALL OF IT) 👇\n")
-    print(session_string)
-    print("\n👆 COPY THE CODE ABOVE 👆")
-    print("Do not share this code with anyone else!")
+    print(session_string) 
+    # Node.js is watching for this string to save it to DB
