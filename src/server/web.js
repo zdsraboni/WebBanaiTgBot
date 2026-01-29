@@ -17,8 +17,8 @@ const start = (bot) => {
             <style>body{background:#0d1117;color:#c9d1d9;font-family:monospace;padding:20px} .err{color:#f85149} .inf{color:#3fb950}</style>
         </head>
         <body>
-            <h1>🚀 Media Banai Bot v${version}</h1>
-            <div id="logs">Loading...</div>
+            <h1>Media Banai Bot v${version}</h1>
+            <div id="logs">vag.....</div>
             <script>
                 fetch('/api/logs').then(r=>r.json()).then(d=>{
                     document.getElementById('logs').innerHTML = d.map(l => 
