@@ -120,4 +120,15 @@ const setupServer = (bot, webhookPath) => {
     setInterval(keepAlive, 600000);
 };
 
-module.exports = { setupServer };
+// handlers.js এর একদম নিচে এটি কপি করুন
+module.exports = { 
+    handleMessage, 
+    handleCallback, 
+    handleGroupMessage, 
+    handleStart,      // এটি এখানে থাকা বাধ্যতামূলক
+    handleHelp, 
+    handleConfig, 
+    handleEditCaption,
+    performDownload 
+};
+
