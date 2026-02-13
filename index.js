@@ -6,46 +6,54 @@ const db = require('./src/utils/db');
 
 // Services & Handlers
 const poller = require('./src/services/poller'); 
-const { 
-    handleMessage, handleCallback, handleGroupMessage, 
-    handleStart, handleHelp, handleConfig, handleEditCaption 
-} = require('./src/utils/handlers');
-
+const handlers = require('./src/utils/handlers'); // Object হিসেবে ইমপোর্ট করা নিরাপদ
 const { handleStats, handleBroadcast } = require('./src/utils/admin'); 
 const { setupServer } = require('./src/server/web');
 
-// 1. Initialize System
+// ১. সিস্টেম ইনিশিয়ালিস্ট
 logger.init();
 if (!fs.existsSync(config.DOWNLOAD_DIR)) {
     fs.mkdirSync(config.DOWNLOAD_DIR, { recursive: true });
 }
 db.connect(); 
 
-// 2. Initialize Bot
-if (!config.BOT_TOKEN) throw new Error("BOT_TOKEN is missing in Environment Variables!");
+// ২. বট ইনিশিয়ালিস্ট
+if (!config.BOT_TOKEN) throw new Error("BOT_TOKEN is missing in Railway Variables!");
 const bot = new Telegraf(config.BOT_TOKEN);
 
-// --- COMMANDS ---
-bot.start(handleStart);
-bot.help(handleHelp);
+/**
+ * ৩. কমান্ড হ্যান্ডলার (Fixes "Handler is undefined" error)
+ * ডিস্ট্রাকচারিং এর বদলে সরাসরি অবজেক্ট রেফারেন্স ব্যবহার করা হয়েছে যাতে এরর না হয়
+ */
+if (handlers.handleStart) bot.start(handlers.handleStart);
+if (handlers.handleHelp) bot.help(handlers.help || handlers.handleHelp);
+
 bot.command('stats', handleStats);
 bot.command('broadcast', handleBroadcast);
-bot.command('setup_api', handleConfig);
-bot.command('mode', handleConfig);
-bot.command('set_destination', handleConfig);
+bot.command('setup_api', handlers.handleConfig);
+bot.command('mode', handlers.handleConfig);
+bot.command('set_destination', handlers.handleConfig);
 
-// --- MESSAGE LOGIC ---
+// ৪. মেসেজ লজিক
 bot.on('text', async (ctx, next) => {
-    if (await handleEditCaption(ctx)) return;
+    // ক্যাপশন এডিটর চেক
+    if (handlers.handleEditCaption && await handlers.handleEditCaption(ctx)) return;
+
+    // গ্রুপ চ্যাট এবং নিকনেম লজিক
     if (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') {
-        return handleGroupMessage(ctx, () => handleMessage(ctx));
+        if (handlers.handleGroupMessage) {
+            return handlers.handleGroupMessage(ctx, () => handlers.handleMessage(ctx));
+        }
     }
-    return handleMessage(ctx);
+    
+    // প্রাইভেট চ্যাট ডাউনলোড লজিক
+    if (handlers.handleMessage) return handlers.handleMessage(ctx);
 });
 
-bot.on('callback_query', handleCallback);
+// ৫. কলব্যাক হ্যান্ডলার
+bot.on('callback_query', handlers.handleCallback);
 
-// --- START SERVICES (Polling vs Webhook) ---
+// --- ৬. সার্ভিস স্টার্ট (Polling vs Webhook) ---
 const isProduction = process.env.NODE_ENV === 'production';
 
 if (isProduction) {
@@ -53,30 +61,32 @@ if (isProduction) {
     const webhookPath = `/bot${config.BOT_TOKEN}`;
     const webhookUrl = `${config.APP_URL}${webhookPath}`;
     
-    // ৪২৯ এরর হ্যান্ডলিং লজিক
     bot.telegram.setWebhook(webhookUrl)
-        .then(() => console.log(`🚀 Webhook Link Active: ${webhookUrl}`))
+        .then(() => console.log(`🚀 Webhook Active: ${webhookUrl}`))
         .catch(err => {
             if (err.response && err.response.error_code === 429) {
-                console.log("⚠️ Telegram Rate Limit (429). Bot is already using the existing webhook.");
+                console.log("⚠️ Telegram 429: Rate limit hit, using existing webhook.");
             } else {
                 console.error(`❌ Webhook Error: ${err.message}`);
             }
         });
 
-    // Web Console এবং Webhook এক সাথে চালানোর জন্য
+    // পোর্ট সংঘর্ষ এড়াতে setupServer এর ভেতরে Webhook প্রসেস হবে
     setupServer(bot, webhookPath); 
 } else {
-    // Local Testing
+    // Local Polling Mode
     poller.init(bot);
     setupServer(bot); 
 }
 
-// --- SAFE SHUTDOWN ---
+// --- ৭. সেফ শাটডাউন (Fixes "Bot is not running" error)
 const stopBot = (signal) => {
-    console.log(`Stopping via ${signal}...`);
-    if (!isProduction) bot.stop(signal);
-    else process.exit(0);
+    console.log(`Stopping system via ${signal}...`);
+    if (!isProduction && bot.polling) {
+        bot.stop(signal);
+    } else {
+        process.exit(0);
+    }
 };
 
 process.once('SIGINT', () => stopBot('SIGINT'));
