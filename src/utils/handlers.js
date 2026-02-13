@@ -29,20 +29,20 @@ const getTranslationButtons = () => {
 // --- START & HELP ---
 const handleStart = async (ctx) => {
     db.addUser(ctx);
-    const text = `👋 <b>Welcome to Media Banai!</b>\nI can download from Twitter, Reddit, Instagram & TikTok.\n\n<b>Features:</b>\n• Auto-Split Large Files\n• Real Thumbnails\n• Translation`;
+    const text = `👋 <b>Welcome to Media Banai!</b>\nI can download from Twitter, Reddit, Instagram & TikTok.\n\n<b>Features:</b>\n• Auto-Split Large Files (50MB+)\n• Video/Image/GIF/Album Support\n• Translation & Custom Captions`;
     const buttons = Markup.inlineKeyboard([[Markup.button.callback('📚 Help', 'help_msg'), Markup.button.callback('📊 Stats', 'stats_msg')]]);
     if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
     else await ctx.reply(text, { parse_mode: 'HTML', ...buttons });
 };
 
 const handleHelp = async (ctx) => {
-    const text = `📚 <b>Help Guide</b>\n\n<b>1. Downloads:</b> Send any valid link.\n<b>2. Custom Caption:</b> Add text after link.\n<b>3. Edit Caption:</b> Reply to bot message with <code>/caption New Text</code>.\n<b>4. Automation:</b> Use Webhook API.`;
+    const text = `📚 <b>Help Guide</b>\n\n<b>1. Downloads:</b> Send any valid link.\n<b>2. Custom Caption:</b> Add text after link.\n<b>3. Edit Caption:</b> Reply to bot message with <code>/caption New Text</code>.\n<b>4. Nicknames:</b> Use <code>/setnick name</code> in groups.`;
     const buttons = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'start_msg')]]);
     if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
     else await ctx.reply(text, { parse_mode: 'HTML' });
 };
 
-// --- CONFIG HANDLER ---
+// --- CONFIG HANDLER (ADMIN ONLY) ---
 const handleConfig = async (ctx) => {
     if (String(ctx.from.id) !== String(config.ADMIN_ID)) return;
     const text = ctx.message.text;
@@ -67,7 +67,7 @@ const handleConfig = async (ctx) => {
     }
 };
 
-// --- ✅ CAPTION EDITOR ---
+// --- CAPTION EDITOR ---
 const handleEditCaption = async (ctx) => {
     const text = ctx.message.text;
     if (!text || !text.startsWith('/caption')) return false;
@@ -94,13 +94,13 @@ const handleEditCaption = async (ctx) => {
     return true;
 };
 
-// --- DOWNLOADER ---
+// --- DOWNLOADER CORE ---
 const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionText, userMsgId) => {
     let finalFile = "";
     let filesToSend = [];
     try {
         if (userMsgId && userMsgId !== 0) { try { await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId); } catch (err) {} }
-        try { await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⏳ <b>Downloading...</b>", { parse_mode: 'HTML' }); } catch (e) {}
+        await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⏳ <b>Downloading...</b>", { parse_mode: 'HTML' }).catch(()=>{});
 
         const timestamp = Date.now();
         const basePath = path.join(config.DOWNLOAD_DIR, `${timestamp}`);
@@ -111,9 +111,9 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
         filesToSend = [finalFile];
         if (fs.existsSync(finalFile)) {
             const stats = fs.statSync(finalFile);
-            // 50MB Limit Check
+            // 50MB Limit splitting logic
             if (!isAudio && stats.size > 49.5 * 1024 * 1024) {
-                await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⚠️ <b>File > 50MB. Splitting...</b>", { parse_mode: 'HTML' });
+                await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⚠️ <b>File > 50MB. Splitting...</b>", { parse_mode: 'HTML' }).catch(()=>{});
                 filesToSend = await downloader.splitFile(finalFile);
             }
         }
@@ -147,9 +147,7 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
 
     } catch (e) {
         let errorMsg = "❌ Error/Timeout.";
-        if (e.message.toLowerCase().includes('403') || e.message.toLowerCase().includes('forbidden')) {
-            errorMsg = "❌ Reddit/Twitter Error: Forbidden (Check cookies.txt formatting)";
-        }
+        if (e.message.includes('403')) errorMsg = "❌ Error: Forbidden (Check Cookies)";
         try { await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, `${errorMsg}\n\nLog: <code>${e.message.substring(0, 50)}</code>`, { parse_mode: 'HTML' }); } 
         catch { await ctx.reply(errorMsg); }
         if (finalFile && fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
@@ -180,7 +178,9 @@ const handleMessage = async (ctx) => {
             platformName = 'Twitter';
             try {
                 const info = await downloader.getInfo(fullUrl);
-                media = { title: info.title || 'Twitter Media', source: fullUrl, type: 'video', thumbnail: info.thumbnail, formats: info.formats || [] };
+                // Video check logic for Twitter
+                const isVideo = info.vcodec && info.vcodec !== 'none';
+                media = { title: info.title || 'Twitter Media', source: fullUrl, type: isVideo ? 'video' : 'image', url: info.url, thumbnail: info.thumbnail, formats: info.formats || [] };
             } catch (e) { media = await twitterService.extract(fullUrl); }
         } else if (fullUrl.includes('reddit.com') || fullUrl.includes('redd.it')) {
             media = await redditService.extract(fullUrl);
@@ -190,7 +190,7 @@ const handleMessage = async (ctx) => {
             if (fullUrl.includes('tiktok.com')) platformName = 'TikTok';
             try {
                 const info = await downloader.getInfo(fullUrl);
-                media = { title: info.title || 'Social Video', source: fullUrl, type: 'video', thumbnail: info.thumbnail, formats: info.formats || [] };
+                media = { title: info.title || 'Social Video', source: fullUrl, type: 'video', url: fullUrl, thumbnail: info.thumbnail, formats: info.formats || [] };
             } catch (e) { media = { title: 'Video', source: fullUrl, type: 'video', formats: [] }; }
         }
 
@@ -206,19 +206,18 @@ const handleMessage = async (ctx) => {
                     if(!seen.has(f.height)) { seen.add(f.height); buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]); }
                 });
             }
-            buttons.push([Markup.button.callback("📹 Download Video (Best)", "vid|best")]);
-            buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
+            buttons.push([Markup.button.callback("📹 Best Quality", "vid|best"), Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
-        else if (media.type === 'gallery') buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
         else if (media.type === 'image') buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
+        else if (media.type === 'gallery') buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
 
         const menuMarkup = Markup.inlineKeyboard([...buttons, ...getTranslationButtons().reply_markup.inline_keyboard]);
 
-        if (media.thumbnail) {
+        if (media.thumbnail || (media.type === 'image' && media.url)) {
             await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(()=>{});
-            await ctx.replyWithPhoto(media.thumbnail, { caption: prettyCaption, parse_mode: 'HTML', ...menuMarkup });
+            await ctx.replyWithPhoto(media.url || media.thumbnail, { caption: prettyCaption, parse_mode: 'HTML', ...menuMarkup });
         } else {
-            await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, `${prettyCaption}`, { parse_mode: 'HTML', ...menuMarkup });
+            await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, prettyCaption, { parse_mode: 'HTML', ...menuMarkup });
         }
 
     } catch (e) { await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed: " + e.message); }
@@ -265,14 +264,13 @@ const handleCallback = async (ctx) => {
         await ctx.answerCbQuery("Translating...");
         try {
             const res = await translate(msg.split('\n').slice(2).join('\n') || msg, { to: id, autoCorrect: true });
-            const link = url || "http"; 
-            await ctx.editMessageCaption(generateCaption(res.text, 'Social', link, '🇧🇩'), { parse_mode: 'HTML', ...getTranslationButtons() });
+            await ctx.editMessageCaption(generateCaption(res.text, 'Social', url || 'source', '🇧🇩'), { parse_mode: 'HTML', ...getTranslationButtons() });
         } catch(e) { await ctx.answerCbQuery("Error"); }
         return;
     }
 
     if (!url) return ctx.answerCbQuery("Expired. Send link again.");
-    if (action === 'img') { await ctx.answerCbQuery("Sending..."); await ctx.replyWithPhoto(url); await ctx.deleteMessage(); }
+    if (action === 'img') { await ctx.answerCbQuery("Sending..."); await ctx.replyWithPhoto(url).catch(() => ctx.replyWithDocument(url)); await ctx.deleteMessage().catch(()=>{}); }
     else await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, ctx.callbackQuery.message.caption, null);
 };
 
