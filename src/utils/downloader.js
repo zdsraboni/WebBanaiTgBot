@@ -19,8 +19,11 @@ class Downloader {
     async getInfo(url) {
         try {
             const { stdout } = await this.execute(`-J "${url}"`);
+            if (!stdout) throw new Error("No metadata found");
             const info = JSON.parse(stdout);
-            const isVideo = (info.vcodec && info.vcodec !== 'none') || info.ext === 'gif';
+            
+            // Image vs Video detection
+            const isVideo = (info.vcodec && info.vcodec !== 'none') || info.ext === 'gif' || info.protocol === 'm3u8_native';
             
             if (!isVideo && info.thumbnails && info.thumbnails.length > 0) {
                 info.is_image = true;
@@ -28,10 +31,12 @@ class Downloader {
             }
             return info;
         } catch (e) { 
-            if (url.includes('x.com') || url.includes('twitter.com')) {
-                return { is_image: true, url: url.replace('x.com', 'vxtwitter.com').replace('twitter.com', 'vxtwitter.com'), title: 'Twitter Media' };
+            // FIXED: Prevent double "vx" prefix
+            let vxUrl = url;
+            if (!vxUrl.includes('vxtwitter.com')) {
+                vxUrl = vxUrl.includes('x.com') ? vxUrl.replace('x.com', 'vxtwitter.com') : vxUrl.replace('twitter.com', 'vxtwitter.com');
             }
-            throw new Error(`Media not found or private.`); 
+            return { is_image: true, url: vxUrl, title: 'Twitter Media' };
         }
     }
 
@@ -46,20 +51,17 @@ class Downloader {
     }
 
     async download(url, isAudio, formatId, outputPath) {
-        let typeArg = isAudio ? `-x --audio-format mp3` : `-f "${formatId}+bestaudio/best" --merge-output-format mp4 --fallback`;
+        let typeArg = isAudio ? `-x --audio-format mp3` : `-f "bestvideo+bestaudio/best" --merge-output-format mp4 --fallback`;
         await this.execute(`${typeArg} -o "${outputPath}.%(ext)s" "${url}"`);
     }
 
     async splitFile(inputPath) {
         if (!fs.existsSync(inputPath)) return [inputPath];
-        const stats = fs.statSync(inputPath);
-        if (stats.size <= 49 * 1024 * 1024) return [inputPath];
         const dir = path.dirname(inputPath);
         const fileName = path.basename(inputPath, path.extname(inputPath));
         const outputPattern = path.join(dir, `${fileName}_part%03d.mp4`);
         await execPromise(`ffmpeg -i "${inputPath}" -c copy -map 0 -segment_time 00:03:00 -f segment "${outputPattern}"`);
-        const parts = fs.readdirSync(dir).filter(f => f.startsWith(fileName + '_part')).map(f => path.join(dir, f)).sort();
-        return parts.length > 0 ? parts : [inputPath];
+        return fs.readdirSync(dir).filter(f => f.startsWith(fileName + '_part')).map(f => path.join(dir, f)).sort();
     }
 }
 
