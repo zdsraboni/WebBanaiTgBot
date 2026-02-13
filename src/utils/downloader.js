@@ -18,7 +18,6 @@ class Downloader {
 
     async getInfo(url) {
         try {
-            // Twitter image check
             const { stdout } = await this.execute(`-J "${url}"`);
             const info = JSON.parse(stdout);
             const isVideo = (info.vcodec && info.vcodec !== 'none') || info.ext === 'gif';
@@ -29,11 +28,10 @@ class Downloader {
             }
             return info;
         } catch (e) { 
-            // Fallback for strict errors
             if (url.includes('x.com') || url.includes('twitter.com')) {
-                return { is_image: true, url: url.replace('x.com', 'vxtwitter.com').replace('twitter.com', 'vxtwitter.com'), title: 'Twitter Image' };
+                return { is_image: true, url: url.replace('x.com', 'vxtwitter.com').replace('twitter.com', 'vxtwitter.com'), title: 'Twitter Media' };
             }
-            throw new Error(`Media fetch failed`); 
+            throw new Error(`Media not found or private.`); 
         }
     }
 
