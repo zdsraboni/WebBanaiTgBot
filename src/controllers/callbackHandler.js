@@ -2,13 +2,9 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../config/settings');
 const downloader = require('../utils/downloader');
-// Note: We need extractor here to get the title again if needed, 
-// OR we can pass the title in the button (limited chars) or re-fetch.
-// For simplicity and speed, most bots re-fetch light metadata or just send the file.
-// BUT since you want the CAPTION on the uploaded file, we need to extract metadata again.
 const extractor = require('../services/extractors'); 
 
-// Helper to generate caption (Duplicate code, can be moved to helpers.js if you want strict DRY)
+// --- Helper: Caption Generator for File Upload ---
 const getCaption = (title, url) => {
     let platform = 'Social';
     if (url.includes('reddit')) platform = 'Reddit';
@@ -26,23 +22,43 @@ const getCaption = (title, url) => {
 
 const handleCallback = async (ctx) => {
     const [action, id] = ctx.callbackQuery.data.split('|');
-    // Extract URL from the message entities (text link)
-    const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url; // For old messages
-    // OR try to find url from the message text if entities fail (depends on how messageHandler sends it)
-    // Since messageHandler now sends <a href="url">Source</a>, Telegram treats it as entity.
+    const message = ctx.callbackQuery.message;
     
-    // Fallback if URL finding is tricky with HTML mode:
-    // In HTML mode, entities are still parsed. The "Source" link will be the first text_link.
+    // 1. Get URL safely
+    // Note: In HTML mode, entities are parsed differently, but text_link usually remains.
+    const url = message.entities?.find(e => e.type === 'text_link')?.url;
     
     if (!url) return ctx.answerCbQuery("❌ Expired or Link not found");
 
-    // We need to re-fetch metadata to get the Title for the caption
-    // (Optimization: In a real large scale app, you might cache this title in a DB/Redis)
-    let mediaTitle = "Downloaded Media";
-    try {
-        const meta = await extractor.extract(url);
-        if (meta) mediaTitle = meta.title;
-    } catch(e) {}
+    // 2. Extract Logic: Try to get the Custom Caption from the existing message
+    // This preserves what the user typed (or the original title if they didn't type anything).
+    let mediaTitle = null;
+    
+    if (message.text) {
+        // We know our format has specific lines.
+        // Usually the text inside blockquote is at the end.
+        // Simple logic: Take the text, split by newline, take the last part.
+        // Or cleaner: Since we constructed it, we can reuse it.
+        // BUT Telegram doesn't give us "blockquote" in raw text easily via API in all libs.
+        // Fallback: Use the whole text minus the header?
+        // Let's rely on Re-Extraction if parsing fails, OR trust the text structure.
+        
+        // Heuristic: If there is a double newline, the caption is likely after it.
+        const parts = message.text.split('\n\n');
+        if (parts.length > 1) {
+            mediaTitle = parts[parts.length - 1].trim(); 
+        } else {
+             mediaTitle = message.text; // Fallback
+        }
+    }
+
+    // Fallback: If we couldn't parse the message text properly, re-fetch metadata
+    if (!mediaTitle || mediaTitle.includes('Media | Source')) {
+        try {
+            const meta = await extractor.extract(url);
+            if (meta) mediaTitle = meta.title;
+        } catch(e) {}
+    }
 
     const captionText = getCaption(mediaTitle, url);
 
@@ -63,19 +79,12 @@ const handleCallback = async (ctx) => {
     // --- ALBUM ---
     else if (action === 'alb') {
         await ctx.answerCbQuery("🚀 Processing...");
-        await ctx.editMessageText("⏳ *Fetching Album...*", { parse_mode: 'Markdown' }); // Status msg doesn't need HTML caption
+        await ctx.editMessageText("⏳ *Fetching Album...*", { parse_mode: 'Markdown' });
         
-        const media = await extractor.extract(url);
+        const media = await extractor.extract(url); // Need to re-fetch to get items list
 
         if (media?.type === 'gallery') {
-            await ctx.editMessageText(`📤 *Sending ${media.items.length} items...*`, { parse_mode: 'Markdown' });
-            
-            // Note: Sending album with caption usually puts caption on the first item
-            // But here we are sending items one by one or as a group? 
-            // Your previous code sent 1-by-1. Let's stick to that but add caption to the FIRST one or all?
-            // Usually caption is annoying on every single item. Let's add it to the first one only OR just send text first.
-            
-            // Better UX: Send the formatted text first, then the files.
+            // Send Caption first as text
             await ctx.reply(captionText, { parse_mode: 'HTML', disable_web_page_preview: true });
 
             for (const item of media.items) {
@@ -84,12 +93,12 @@ const handleCallback = async (ctx) => {
                     else {
                         const tmpName = path.join(config.DOWNLOAD_DIR, `gal_${Date.now()}_${Math.random()}.jpg`);
                         await downloader.downloadFile(item.url, tmpName);
-                        await ctx.replyWithDocument({ source: tmpName }); // Sending as Doc based on your prev code
+                        await ctx.replyWithDocument({ source: tmpName });
                         fs.unlinkSync(tmpName);
                     }
                 } catch (e) {}
             }
-            await ctx.deleteMessage(); // Delete the "Sending..." status
+            await ctx.deleteMessage();
         } else {
             await ctx.editMessageText("❌ Failed.");
         }
