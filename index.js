@@ -41,7 +41,7 @@ bot.on('text', async (ctx) => {
 
     const inputUrl = match[0];
     // <--- পরিবর্তন: লিংক বাদে বাকি টেক্সটকে ক্যাপশন হিসেবে ধরা হচ্ছে --->
-    const userCustomCaption = fullText.replace(inputUrl, '').trim() || "Uploaded ✅";
+    const userCustomCaption = fullText.replace(inputUrl, '').trim() || "null";
 
     console.log(`📩 New Request: ${inputUrl}`);
     const msg = await ctx.reply("🔍 *Analyzing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
@@ -100,7 +100,7 @@ bot.on('callback_query', async (ctx) => {
     // <--- পরিবর্তন: আগের মেসেজ থেকে সোর্স লিংক এবং কাস্টম ক্যাপশন বের করা হচ্ছে --->
     const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
     const captionMatch = messageText.match(/📝 Caption: (.*)/s);
-    const finalCaption = captionMatch ? captionMatch[1] : "Uploaded ✅";
+    const finalCaption = captionMatch ? captionMatch[1] : "null";
 
     if (!url) return ctx.answerCbQuery("❌ Expired");
 
