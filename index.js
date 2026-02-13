@@ -48,7 +48,6 @@ bot.on('text', async (ctx) => {
         const fullUrl = await resolveRedirect(inputUrl);
         let media = null;
 
-        // Route ONLY to Reddit or Twitter
         if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
             media = await twitterService.extract(fullUrl);
         } else {
@@ -94,8 +93,9 @@ bot.on('callback_query', async (ctx) => {
     if (!url) return ctx.answerCbQuery("❌ Expired");
 
     if (action === 'img') {
-        const sent = await ctx.replyWithPhoto(url);
-        if(!sent) await ctx.replyWithDocument(url);
+        // <--- পরিবর্তন: ছবির সাথে ক্যাপশন যোগ করা হয়েছে --->
+        const sent = await ctx.replyWithPhoto(url, { caption: "Uploaded ✅" });
+        if(!sent) await ctx.replyWithDocument(url, { caption: "Uploaded ✅" });
         await ctx.deleteMessage();
     } 
     else if (action === 'alb') {
@@ -107,7 +107,14 @@ bot.on('callback_query', async (ctx) => {
         if (media?.type === 'gallery') {
             await ctx.deleteMessage();
             for (const item of media.items) {
-                try { if(item.type==='video') await ctx.replyWithVideo(item.url); else await ctx.replyWithDocument(item.url); } catch {}
+                try { 
+                    if(item.type==='video') 
+                        // <--- পরিবর্তন: অ্যালবামের ভিডিওর সাথে ক্যাপশন যোগ করা হয়েছে --->
+                        await ctx.replyWithVideo(item.url, { caption: "Uploaded ✅" }); 
+                    else 
+                        // <--- পরিবর্তন: অ্যালবামের ছবির সাথে ক্যাপশন যোগ করা হয়েছে --->
+                        await ctx.replyWithDocument(item.url, { caption: "Uploaded ✅" }); 
+                } catch {}
             }
         }
     } 
@@ -128,8 +135,13 @@ bot.on('callback_query', async (ctx) => {
             if (stats.size > 49.5 * 1024 * 1024) await ctx.editMessageText("⚠️ File > 50MB");
             else {
                 await ctx.editMessageText("📤 *Uploading...*", { parse_mode: 'Markdown' });
-                if (isAudio) await ctx.replyWithAudio({ source: finalFile });
-                else await ctx.replyWithVideo({ source: finalFile });
+                if (isAudio) 
+                    // <--- পরিবর্তন: অডিও ফাইলের সাথে ক্যাপশন যোগ করা হয়েছে --->
+                    await ctx.replyWithAudio({ source: finalFile }, { caption: "Uploaded ✅" });
+                else 
+                    // <--- পরিবর্তন: ভিডিও ফাইলের সাথে ক্যাপশন যোগ করা হয়েছে --->
+                    await ctx.replyWithVideo({ source: finalFile }, { caption: "Uploaded ✅" });
+                
                 await ctx.deleteMessage();
                 console.log(`✅ Uploaded`);
             }
