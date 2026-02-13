@@ -5,8 +5,7 @@ module.exports = {
     // API & Server Keys
     BOT_TOKEN: process.env.BOT_TOKEN,
     
-    // রেলওয়েতে RAILWAY_PUBLIC_DOMAIN অটোমেটিক থাকে। 
-    // এটি চেক করবে রেলওয়ে ডোমেইন আছে কি না, না থাকলে রেন্ডার বা ম্যানুয়াল ইউআরএল নিবে।
+    // রেলওয়ে এবং রেন্ডার উভয় প্ল্যাটফর্মের জন্য অটোমেটিক URL ডিটেকশন
     APP_URL: process.env.RAILWAY_PUBLIC_DOMAIN 
         ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` 
         : (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL),
@@ -14,7 +13,7 @@ module.exports = {
     PORT: process.env.PORT || 3000,
     ADMIN_ID: process.env.ADMIN_ID || 123456789,
     
-    // Database Connection
+    // Database
     MONGO_URI: process.env.MONGO_URI, 
 
     // File System Paths
@@ -37,8 +36,6 @@ module.exports = {
         'https://redlib.tux.pizza'
     ]
 };
-
-
 //require('dotenv').config();
 //const path = require('path');
 
