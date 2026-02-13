@@ -4,128 +4,86 @@ const config = require('../config/settings');
 const downloader = require('../utils/downloader');
 const extractor = require('../services/extractors'); 
 
-// --- HELPER: HTML Formatting ---
-const formatHtml = (content, url) => {
-    let platform = 'Social';
-    if (url.includes('reddit')) platform = 'Reddit';
-    else if (url.includes('x.com') || url.includes('twitter')) platform = 'Twitter';
-    else if (url.includes('tiktok')) platform = 'TikTok';
-    else if (url.includes('instagram')) platform = 'Instagram';
-
-    const cleanContent = (content && content.length > 0) ? content.trim() : "Media Content";
-    const safeText = cleanContent.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-    return `<b>🎬 ${platform} Media</b> | <a href="${url}">Source</a>\n\n<blockquote>${safeText}</blockquote>`;
+const generateCaption = (text, platform, sourceUrl) => {
+    const safeText = (text || "Media").replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return `<b>🎬 ${platform} Media</b> | <a href="${sourceUrl}">Source</a>\n\n<blockquote>${safeText}</blockquote>`;
 };
 
 const handleCallback = async (ctx) => {
     const [action, id] = ctx.callbackQuery.data.split('|');
     const message = ctx.callbackQuery.message;
+    const url = (message.entities || message.caption_entities)?.find(e => e.type === 'text_link')?.url;
     
-    const url = message.entities?.find(e => e.type === 'text_link')?.url;
-    if (!url) return ctx.answerCbQuery("❌ Expired or Link not found");
+    if (!url) return ctx.answerCbQuery("❌ Link not found");
 
-    let contentText = "";
-    if (message.text) {
-        const parts = message.text.split('\n\n');
-        contentText = parts.length >= 2 ? parts.slice(1).join('\n\n').trim() : message.text.replace(/.*\|\s*Source/i, '').trim();
-    }
+    let platform = url.includes('reddit') ? 'Reddit' : (url.includes('tiktok') ? 'TikTok' : (url.includes('instagram') ? 'Instagram' : 'Twitter'));
+    
+    // Extracting text from caption or text body
+    let rawText = message.caption || message.text || "";
+    let contentText = rawText.split('\n\n').length >= 2 ? rawText.split('\n\n').slice(1).join('\n\n').trim() : rawText.replace(/.*Source/i, '').trim();
 
     if (!contentText) {
-        try {
-            const meta = await extractor.extract(url);
-            if (meta) contentText = meta.title;
-        } catch(e) { contentText = "Media Content"; }
+        try { const meta = await extractor.extract(url); contentText = meta.title; } catch(e) { contentText = "Media Content"; }
     }
 
-    const finalHtmlCaption = formatHtml(contentText, url);
+    const finalHtmlCaption = generateCaption(contentText, platform, url);
 
     try {
-        await ctx.answerCbQuery("🚀 Processing...");
+        await ctx.answerCbQuery("🚀 Downloading...");
         const basePath = path.join(config.DOWNLOAD_DIR, `${Date.now()}`);
-        
-        // --- 🖼️ IMAGE HANDLER (With Fail-safe) ---
+
         if (action === 'img') {
             const imgPath = `${basePath}.jpg`;
+            await downloader.downloadFile(url, imgPath);
             try {
-                await downloader.downloadFile(url, imgPath);
-                
-                // চেক করুন ফাইলটি তৈরি হয়েছে কি না এবং খালি কি না
-                if (!fs.existsSync(imgPath) || fs.statSync(imgPath).size === 0) throw new Error("File empty");
-
-                // প্রথমে ছবি হিসেবে পাঠানোর চেষ্টা
+                // Priority: Send as Photo
                 await ctx.replyWithPhoto({ source: imgPath }, { caption: finalHtmlCaption, parse_mode: 'HTML' });
-            } catch (imgErr) {
-                console.log("⚠️ Photo fail, sending as document...");
-                // ছবি হিসেবে না গেলে ফাইল (Document) হিসেবে পাঠানোর চেষ্টা
+            } catch (e) {
+                // Fallback: Send as Document only if photo fails
                 await ctx.replyWithDocument({ source: imgPath }, { caption: finalHtmlCaption, parse_mode: 'HTML' });
             }
             if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath);
-            await ctx.deleteMessage();
+            await ctx.deleteMessage().catch(()=>{});
         } 
-        
-        // --- 📚 ALBUM HANDLER ---
         else if (action === 'alb') {
-            await ctx.editMessageText("⏳ <b>Fetching Album...</b>", { parse_mode: 'HTML' });
+            await ctx.editMessageCaption(ctx.chat.id, message.message_id, null, "⏳ <b>Fetching...</b>", { parse_mode: 'HTML' }).catch(async () => {
+                await ctx.editMessageText("⏳ <b>Fetching...</b>", { parse_mode: 'HTML' });
+            });
             const media = await extractor.extract(url);
             if (media?.type === 'gallery') {
                 await ctx.reply(finalHtmlCaption, { parse_mode: 'HTML', disable_web_page_preview: true });
                 for (const item of media.items) {
+                    const tmp = path.join(config.DOWNLOAD_DIR, `gal_${Date.now()}.jpg`);
+                    await downloader.downloadFile(item.url, tmp);
                     try {
-                        const tmpName = path.join(config.DOWNLOAD_DIR, `gal_${Date.now()}_${Math.random()}.jpg`);
-                        await downloader.downloadFile(item.url, tmpName);
-                        
-                        // অ্যালবাম আইটেমেও Fail-safe ব্যবহার
-                        try {
-                            if (item.type === 'video') await ctx.replyWithVideo({ source: tmpName });
-                            else await ctx.replyWithPhoto({ source: tmpName });
-                        } catch (e) {
-                            await ctx.replyWithDocument({ source: tmpName });
-                        }
-                        
-                        if (fs.existsSync(tmpName)) fs.unlinkSync(tmpName);
-                    } catch (e) {}
+                        if (item.type === 'video') await ctx.replyWithVideo({ source: tmp });
+                        else await ctx.replyWithPhoto({ source: tmp });
+                    } catch (e) { await ctx.replyWithDocument({ source: tmp }); }
+                    if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
                 }
-                await ctx.deleteMessage();
+                await ctx.deleteMessage().catch(()=>{});
             }
         } 
-        
-        // --- 📹 VIDEO / 🎵 AUDIO HANDLER ---
         else {
             const isAudio = action === 'aud';
             const finalFile = `${basePath}.${isAudio ? 'mp3' : 'mp4'}`;
-            await ctx.editMessageText(`⏳ <b>Downloading...</b>`, { parse_mode: 'HTML' });
+            
+            // Updating status without removing the caption if possible
+            try { await ctx.editMessageCaption(ctx.chat.id, message.message_id, null, "⏳ <b>Downloading...</b>", { parse_mode: 'HTML' }); } catch(e) {}
 
-            if (id === 'best' && (url.includes('.mp4') || url.includes('.mp3'))) {
-                await downloader.downloadFile(url, finalFile);
-            } else {
-                await downloader.download(url, isAudio, id, basePath);
+            await downloader.download(url, isAudio, id, basePath);
+            
+            if (fs.existsSync(finalFile)) {
+                await ctx.editMessageCaption(ctx.chat.id, message.message_id, null, "📤 <b>Uploading...</b>", { parse_mode: 'HTML' }).catch(()=>{});
+                const method = isAudio ? 'replyWithAudio' : 'replyWithVideo';
+                await ctx[method]({ source: finalFile }, { caption: finalHtmlCaption, parse_mode: 'HTML' });
+                await ctx.deleteMessage().catch(()=>{});
+                fs.unlinkSync(finalFile);
             }
-
-            if (fs.existsSync(finalFile) && fs.statSync(finalFile).size > 0) {
-                if (fs.statSync(finalFile).size > 49 * 1024 * 1024) {
-                    await ctx.editMessageText("⚠️ File > 50MB. Telegram limit.");
-                } else {
-                    await ctx.editMessageText("📤 <b>Uploading...</b>", { parse_mode: 'HTML' });
-                    const method = isAudio ? 'replyWithAudio' : 'replyWithVideo';
-                    
-                    try {
-                        await ctx[method]({ source: finalFile }, { caption: finalHtmlCaption, parse_mode: 'HTML' });
-                    } catch (uploadErr) {
-                        // ভিডিও আপলোড ফেল করলে ফাইল হিসেবে পাঠানো
-                        await ctx.replyWithDocument({ source: finalFile }, { caption: finalHtmlCaption, parse_mode: 'HTML' });
-                    }
-                    await ctx.deleteMessage();
-                }
-            } else {
-                await ctx.editMessageText("❌ Download failed.");
-            }
-            if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
         }
-
     } catch (e) {
-        console.error("Handler Error:", e);
-        await ctx.editMessageText(`❌ Error: ${e.message.substring(0, 100)}`);
+        console.error(e);
+        await ctx.reply("❌ Error occurred.");
     }
 };
 
