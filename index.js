@@ -1,83 +1,216 @@
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
 
-// Import Version
+// ১. প্রয়োজনীয় ফাইল এবং সেটিংস ইমপোর্ট করা
 const { version } = require('./package.json');
-
-// Import Modules
 const config = require('./src/config/settings');
 const logger = require('./src/utils/logger');
+const downloader = require('./src/utils/downloader');
 
-// Import New Controllers (These hold the new logic)
-const { handleMessage } = require('./src/controllers/messageHandler');
-const { handleCallback } = require('./src/controllers/callbackHandler');
+// সার্ভিসগুলো (Reddit & Twitter) ইমপোর্ট করা
+const redditService = require('./src/services/reddit');
+const twitterService = require('./src/services/twitter');
 
-// Init Logger
+// লগার এবং সার্ভার ইনিশিয়ালাইজ করা
 logger.init();
-
 const bot = new Telegraf(config.BOT_TOKEN);
 const app = express();
 
-// Ensure Download Directory Exists
-if (!fs.existsSync(config.DOWNLOAD_DIR)) {
-    fs.mkdirSync(config.DOWNLOAD_DIR, { recursive: true });
-}
+// ডাউনলোড ফোল্ডার না থাকলে তৈরি করে নেওয়া
+if (!fs.existsSync(config.DOWNLOAD_DIR)) fs.mkdirSync(config.DOWNLOAD_DIR, { recursive: true });
 
-// --- COMMANDS ---
-bot.start((ctx) => ctx.reply(
-    `👋 **Media Banai Bot v${version}**\n\nStable Mode.\nSend Reddit, Twitter, TikTok, or Instagram links.\n\nYou can add a custom caption by typing text after the link.`
-));
+// --- হেল্পার ফাংশনসমূহ ---
 
-// --- HANDLERS (Delegating to Controllers) ---
+/**
+ * শর্ট ইউআরএল থেকে আসল বড় ইউআরএল বের করার জন্য
+ */
+const resolveRedirect = async (url) => {
+    if (!url.includes('/s/')) return url;
+    try {
+        const res = await axios.head(url, { maxRedirects: 0, validateStatus: s => s >= 300 && s < 400, headers: { 'User-Agent': config.UA_ANDROID } });
+        return res.headers.location || url;
+    } catch (e) { return url; }
+};
 
-// 1. Text Messages -> messageHandler.js
-bot.on('text', handleMessage);
+/**
+ * HTML ফরম্যাটিং এর সময় স্পেশাল ক্যারেক্টার ফিল্টার করার জন্য (যাতে এরর না আসে)
+ */
+const escapeHTML = (text) => {
+    return text ? text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : "";
+};
 
-// 2. Callback Queries (Buttons) -> callbackHandler.js
-bot.on('callback_query', handleCallback);
+// --- মেইন মেসেজ হ্যান্ডলার (যখন ইউজার লিংক পাঠাবে) ---
 
-// --- SERVER (Dashboard & Webhook) ---
-app.get('/api/logs', (req, res) => res.json(logger.getLogs()));
+bot.start((ctx) => ctx.reply(`👋 **Media Banai Bot v${version}**\n\nSend: [Link] [Optional Custom Caption]`));
 
-app.get('/', (req, res) => {
-    res.send(`
-    <html>
-    <head>
-        <meta http-equiv="refresh" content="2">
-        <title>Media Banai v${version}</title>
-        <style>body{background:#0d1117;color:#c9d1d9;font-family:monospace;padding:20px} .err{color:#f85149} .inf{color:#3fb950}</style>
-    </head>
-    <body>
-        <h1>🚀 Media Banai Bot v${version}</h1>
-        <div id="logs">Loading...</div>
-        <script>
-            fetch('/api/logs').then(r=>r.json()).then(d=>{
-                document.getElementById('logs').innerHTML = d.map(l => 
-                    \`<div style="border-bottom:1px solid #30363d;padding:2px">
-                        <span style="color:#8b949e">[\${l.time}]</span> 
-                        <span class="\${l.type === 'ERROR' ? 'err' : 'inf'}">\${l.type}</span> 
-                        \${l.message}
-                    </div>\`
-                ).join('');
-            });
-        </script>
-    </body>
-    </html>`);
+bot.on('text', async (ctx) => {
+    const fullText = ctx.message.text;
+    const match = fullText.match(config.URL_REGEX); // লিংক আছে কিনা চেক
+    if (!match) return;
+
+    const inputUrl = match[0];
+    
+    // ১. কাস্টম ক্যাপশন আলাদা করা (না থাকলে "null" সেট করা)
+    const userCustomCaption = fullText.replace(inputUrl, '').trim() || "null";
+
+    console.log(`📩 New Request: ${inputUrl}`);
+    const msg = await ctx.reply("🔍 *Analyzing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
+
+    try {
+        const fullUrl = await resolveRedirect(inputUrl);
+        let media = null;
+
+        // প্ল্যাটফর্ম অনুযায়ী সার্ভিস কল করা
+        if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
+            media = await twitterService.extract(fullUrl);
+        } else {
+            media = await redditService.extract(fullUrl);
+        }
+
+        if (!media) throw new Error("Media not found");
+
+        // --- ২. "null" কন্ডিশন লজিক ---
+        let finalCaptionText;
+        if (userCustomCaption === "null") {
+            // যদি ইউজার ক্যাপশন না দেয়, তবে পোস্টের আসল টাইটেল ব্যবহার হবে
+            finalCaptionText = media.title || "Uploaded ✅";
+        } else {
+            // ইউজার কিছু লিখে থাকলে সেটিই ক্যাপশন হবে
+            finalCaptionText = userCustomCaption;
+        }
+
+        // ৩. UI ডিজাইন: Quote ব্লকের ভেতরে ক্যাপশন সাজানো
+        const safeCaption = escapeHTML(finalCaptionText);
+        const htmlLayout = `<b>🎬 Media Content</b>\n\n<blockquote>${safeCaption}</blockquote>`;
+
+        // বাটন জেনারেশন লজিক
+        const buttons = [];
+        if (media.type === 'gallery') {
+            buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
+        } 
+        else if (media.type === 'image') {
+            buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
+        } 
+        else if (media.type === 'video') {
+            if (media.formats && media.formats.length > 0) {
+                const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height).slice(0, 5);
+                formats.forEach(f => {
+                    if(!buttons.some(b => b[0].text.includes(f.height))) 
+                        buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]);
+                });
+            }
+            if (buttons.length === 0) buttons.push([Markup.button.callback("📹 Download Video", `vid|best`)]);
+            buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
+        }
+
+        // ৪. বাটন মেসেজ আপডেট (থাম্বনেইল প্রিভিউ সচল রাখা হয়েছে)
+        await ctx.telegram.editMessageText(
+            ctx.chat.id, 
+            msg.message_id, 
+            null, 
+            `${htmlLayout}\n\n<a href="${media.url || media.source}">🔗 Source Link</a>\n\n📝 Caption: ${finalCaptionText}`, 
+            { 
+                parse_mode: 'HTML', 
+                disable_web_page_preview: false, // এটি false হওয়ায় থাম্বনেইল প্রিভিউ দেখা যাবে
+                ...Markup.inlineKeyboard(buttons) 
+            }
+        );
+
+    } catch (e) {
+        console.error(e);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed. Content unavailable.");
+    }
 });
 
+// --- কলব্যাক হ্যান্ডলার (যখন ইউজার বাটনে ক্লিক করবে) ---
+
+bot.on('callback_query', async (ctx) => {
+    const [action, id] = ctx.callbackQuery.data.split('|');
+    const messageText = ctx.callbackQuery.message.text || "";
+    
+    // আগের মেসেজ থেকে সোর্স লিংক এবং ক্যাপশন ডাটা উদ্ধার করা
+    const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
+    const captionMatch = messageText.match(/📝 Caption: (.*)/s);
+    const finalCaption = captionMatch ? captionMatch[1] : "Uploaded ✅";
+    
+    // মিডিয়ার জন্য ডিজাইন করা UI ক্যাপশন
+    const finalUI = `<blockquote>${escapeHTML(finalCaption)}</blockquote>`;
+
+    if (!url) return ctx.answerCbQuery("❌ Expired");
+
+    // ইমেজ ডাউনলোড ও পাঠানোর লজিক
+    if (action === 'img') {
+        const sent = await ctx.replyWithPhoto(url, { caption: finalUI, parse_mode: 'HTML' });
+        if(!sent) await ctx.replyWithDocument(url, { caption: finalUI, parse_mode: 'HTML' });
+        await ctx.deleteMessage();
+    } 
+    // অ্যালবাম ডাউনলোড ও পাঠানোর লজিক
+    else if (action === 'alb') {
+        await ctx.answerCbQuery("🚀 Processing Album...");
+        let media = null;
+        if (url.includes('x.com') || url.includes('twitter')) media = await twitterService.extract(url);
+        else media = await redditService.extract(url);
+
+        if (media?.type === 'gallery') {
+            await ctx.deleteMessage();
+            for (const item of media.items) {
+                try { 
+                    if(item.type==='video') 
+                        await ctx.replyWithVideo(item.url, { caption: finalUI, parse_mode: 'HTML' }); 
+                    else 
+                        await ctx.replyWithDocument(item.url, { caption: finalUI, parse_mode: 'HTML' }); 
+                } catch {}
+            }
+        }
+    } 
+    // ভিডিও এবং অডিও প্রসেসিং লজিক
+    else {
+        await ctx.answerCbQuery("🚀 Downloading...");
+        await ctx.editMessageText(`⏳ <b>Downloading...</b>`, { parse_mode: 'HTML' });
+        
+        const timestamp = Date.now();
+        const basePath = path.join(config.DOWNLOAD_DIR, `${timestamp}`);
+        const isAudio = action === 'aud';
+        const finalFile = `${basePath}.${isAudio ? 'mp3' : 'mp4'}`;
+
+        try {
+            // downloader মডিউল ব্যবহার করে ফাইলটি সার্ভারে আনা হচ্ছে
+            await downloader.download(url, isAudio, id, basePath);
+            await ctx.editMessageText("📤 <b>Uploading...</b>", { parse_mode: 'HTML' });
+            
+            // ফাইলটি টেলিগ্রামে আপলোড করা হচ্ছে
+            if (isAudio) 
+                await ctx.replyWithAudio({ source: finalFile }, { caption: finalUI, parse_mode: 'HTML' });
+            else 
+                await ctx.replyWithVideo({ source: finalFile }, { caption: finalUI, parse_mode: 'HTML' });
+            
+            await ctx.deleteMessage();
+        } catch (e) { 
+            console.error(e); 
+            await ctx.editMessageText("❌ Download/Upload Error"); 
+        } finally { 
+            // কাজ শেষ হওয়ার পর সার্ভার থেকে টেম্পোরারি ফাইলটি মুছে ফেলা হচ্ছে
+            if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile); 
+        }
+    }
+});
+
+// --- সার্ভার কনফিগারেশন এবং বট লঞ্চ ---
+
 if (process.env.NODE_ENV === 'production') {
-    // Webhook Mode for Production (Render/Railway)
+    // প্রোডাকশন মোডে (Railway, Render) ওয়েবহুক ব্যবহার হবে
     app.use(bot.webhookCallback('/bot'));
     bot.telegram.setWebhook(`${config.APP_URL}/bot`);
     app.listen(config.PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${config.PORT}`));
-} else {
-    // Polling Mode for Local Development
-    bot.launch();
-    console.log("🚀 Bot started in Polling Mode");
+} else { 
+    // লোকাল পিসিতে টেস্ট করার জন্য পোলিং মোড
+    bot.launch(); 
+    console.log("🚀 Bot is Polling (Local Mode)...");
 }
 
-// Graceful Stop
+// সিগন্যাল হ্যান্ডলিং (বট নিরাপদে বন্ধ করার জন্য)
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
