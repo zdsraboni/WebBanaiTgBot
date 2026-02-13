@@ -1,290 +1,123 @@
-const { Markup } = require('telegraf');
-const fs = require('fs');
-const path = require('path');
+const express = require('express');
+const axios = require('axios');
+const logger = require('../utils/logger');
 const config = require('../config/settings');
-const { translate } = require('google-translate-api-x');
-const db = require('./db');
-const { resolveRedirect } = require('./helpers'); 
-const downloader = require('./downloader');
-const redditService = require('../services/reddit');
-const twitterService = require('../services/twitter');
+const handlers = require('../utils/handlers'); 
+const db = require('../utils/db');
 
-// --- HELPERS ---
-const getFlagEmoji = (code) => {
-    if (!code || code.length !== 2) return '🇧🇩';
-    return code.toUpperCase().replace(/./g, char => String.fromCodePoint(char.charCodeAt(0) + 127397));
-};
+const setupServer = (bot, webhookPath) => {
+    const app = express();
 
-const generateCaption = (text, platform, sourceUrl, flagEmoji) => {
-    const cleanText = text ? (text.length > 900 ? text.substring(0, 897) + '...' : text) : "Media Content";
-    const safeText = cleanText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const validFlag = flagEmoji || '🇧🇩';
-    return `🎬 <b>${platform} media</b> | <a href="${sourceUrl}">source</a> ${validFlag}\n\n<blockquote>${safeText}</blockquote>`;
-};
+    // Enable Body Parsing
+    app.use(express.json());
+    app.use(express.urlencoded({ extended: true }));
 
-const getTranslationButtons = () => {
-    return Markup.inlineKeyboard([[Markup.button.callback('🇺🇸 English', 'trans|en'), Markup.button.callback('🇧🇩 Bangla', 'trans|bn')]]);
-};
-
-// --- START & HELP HANDLERS ---
-const handleStart = async (ctx) => {
-    db.addUser(ctx);
-    const text = `👋 <b>Welcome to Media Banai!</b>\nI can download from Twitter, Reddit, Instagram & TikTok.\n\n<b>Features:</b>\n• Auto-Split Large Files (50MB+)\n• Video/Image/GIF/Album Support\n• Translation & Custom Captions`;
-    const buttons = Markup.inlineKeyboard([[Markup.button.callback('📚 Help', 'help_msg'), Markup.button.callback('📊 Stats', 'stats_msg')]]);
-    if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
-    else await ctx.reply(text, { parse_mode: 'HTML', ...buttons });
-};
-
-const handleHelp = async (ctx) => {
-    const text = `📚 <b>Help Guide</b>\n\n<b>1. Downloads:</b> Send any valid link.\n<b>2. Custom Caption:</b> Add text after link.\n<b>3. Edit Caption:</b> Reply to bot message with <code>/caption New Text</code>.\n<b>4. Nicknames:</b> Use <code>/setnick name</code> in groups.`;
-    const buttons = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'start_msg')]]);
-    if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
-    else await ctx.reply(text, { parse_mode: 'HTML' });
-};
-
-// --- CONFIG HANDLER (ADMIN ONLY) ---
-const handleConfig = async (ctx) => {
-    if (String(ctx.from.id) !== String(config.ADMIN_ID)) return;
-    const text = ctx.message.text;
-
-    if (text.startsWith('/set_destination')) {
-        let targetId = ctx.chat.id;
-        let title = ctx.chat.title || "Private Chat";
-        if (text.includes('reset')) { targetId = ""; title = "Default"; }
-        await db.setWebhookTarget(config.ADMIN_ID, targetId);
-        return ctx.reply(`✅ Target: <b>${title}</b>`, { parse_mode: 'HTML' });
+    // ১. ওয়েববুক কলব্যাক হ্যান্ডলার (রেলওয়ের জন্য)
+    if (process.env.NODE_ENV === 'production' && webhookPath) {
+        app.use(bot.webhookCallback(webhookPath));
+        console.log("📡 Webhook Callback attached to: " + webhookPath);
     }
-    if (text.startsWith('/setup_api')) {
-        const parts = text.split(' ');
-        if (parts.length < 3) return ctx.reply("Usage: /setup_api KEY USER");
-        await db.updateApiConfig(ctx.from.id, parts[1], parts[2]);
-        return ctx.reply("✅ API Configured!");
-    }
-    if (text.startsWith('/mode')) {
-        const mode = text.split(' ')[1];
-        await db.toggleMode(ctx.from.id, mode);
-        return ctx.reply(`🔄 Mode: <b>${mode}</b>`, { parse_mode: 'HTML' });
-    }
-};
 
-// --- CAPTION EDITOR ---
-const handleEditCaption = async (ctx) => {
-    const text = ctx.message.text;
-    if (!text || !text.startsWith('/caption')) return false;
-    if (!ctx.message.reply_to_message) {
-        await ctx.reply("⚠️ Reply to a message to edit it.", { reply_to_message_id: ctx.message.message_id });
-        return true; 
-    }
-    if (ctx.message.reply_to_message.from.id !== ctx.botInfo.id) {
-        await ctx.reply("⚠️ I can only edit my own messages.", { reply_to_message_id: ctx.message.message_id });
-        return true;
-    }
-    const newCaption = text.replace(/^\/caption\s*/, '').trim();
-    if (!newCaption) {
-        await ctx.reply("⚠️ Usage: <code>/caption New Title Here</code>", { parse_mode: 'HTML', reply_to_message_id: ctx.message.message_id });
-        return true;
-    }
-    try {
-        const extra = { parse_mode: 'HTML', reply_markup: ctx.message.reply_to_message.reply_markup };
-        await ctx.telegram.editMessageCaption(ctx.chat.id, ctx.message.reply_to_message.message_id, null, newCaption, extra);
-        await ctx.deleteMessage().catch(()=>{});
-        const confirm = await ctx.reply("✅ Updated!");
-        setTimeout(() => ctx.telegram.deleteMessage(ctx.chat.id, confirm.message_id).catch(()=>{}), 2000);
-    } catch (e) { await ctx.reply(`❌ Error: ${e.description}`, { reply_to_message_id: ctx.message.message_id }); }
-    return true;
-};
+    // ২. API Endpoint for Logs
+    app.get('/api/logs', (req, res) => {
+        res.json(logger.getLogs());
+    });
 
-// --- DOWNLOADER CORE ---
-const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionText, userMsgId) => {
-    let finalFile = "";
-    let filesToSend = [];
-    try {
-        if (userMsgId && userMsgId !== 0) { try { await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId); } catch (err) {} }
-        await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⏳ <b>Downloading...</b>", { parse_mode: 'HTML' }).catch(()=>{});
+    // ৩. AUTOMATION WEBHOOK (External Trigger)
+    app.all('/api/trigger', async (req, res) => {
+        const query = req.query;
+        const body = req.body;
+        
+        const secret = query.secret || body.secret;
+        const url = query.url || body.url;
 
-        const timestamp = Date.now();
-        const basePath = path.join(config.DOWNLOAD_DIR, `${timestamp}`);
-        finalFile = `${basePath}.${isAudio ? 'mp3' : 'mp4'}`;
-
-        await downloader.download(url, isAudio, qualityId, basePath);
-
-        filesToSend = [finalFile];
-        if (fs.existsSync(finalFile)) {
-            const stats = fs.statSync(finalFile);
-            // 50MB Limit splitting logic
-            if (!isAudio && stats.size > 49.5 * 1024 * 1024) {
-                await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⚠️ <b>File > 50MB. Splitting...</b>", { parse_mode: 'HTML' }).catch(()=>{});
-                filesToSend = await downloader.splitFile(finalFile);
-            }
+        if (String(secret) !== String(config.ADMIN_ID)) {
+            return res.status(403).send('❌ Access Denied');
         }
 
-        for (let i = 0; i < filesToSend.length; i++) {
-            const file = filesToSend[i];
-            const partCaption = i === 0 ? captionText : `${captionText}\n\n🧩 <b>Part ${i + 1}</b>`;
+        if (!url) return res.status(400).send('❌ No URL provided');
 
-            if (i === 0 && filesToSend.length === 1) {
-                try {
-                    await ctx.telegram.editMessageMedia(
-                        ctx.chat.id, botMsgId, null,
-                        { type: isAudio ? 'audio' : 'video', media: { source: file }, caption: partCaption, parse_mode: 'HTML' },
-                        { ...getTranslationButtons().reply_markup } 
-                    );
-                } catch (editError) {
-                    await ctx.telegram.deleteMessage(ctx.chat.id, botMsgId).catch(()=>{});
-                    if (isAudio) await ctx.replyWithAudio({ source: file }, { caption: partCaption, parse_mode: 'HTML', ...getTranslationButtons() });
-                    else await ctx.replyWithVideo({ source: file }, { caption: partCaption, parse_mode: 'HTML', ...getTranslationButtons() });
-                }
-            } else {
-                if (isAudio) await ctx.replyWithAudio({ source: file }, { caption: partCaption, parse_mode: 'HTML' });
-                else await ctx.replyWithVideo({ source: file }, { caption: partCaption, parse_mode: 'HTML' });
-            }
-            if (fs.existsSync(file)) fs.unlinkSync(file);
-        }
+        res.status(200).send('✅ Link Received. Processing...');
 
-        if (filesToSend.length > 1 && fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
-        const userId = ctx.callbackQuery ? ctx.callbackQuery.from.id : (ctx.message ? ctx.message.from.id : null);
-        if (userId) db.incrementDownloads(userId);
-
-    } catch (e) {
-        let errorMsg = "❌ Error/Timeout.";
-        if (e.message.includes('403')) errorMsg = "❌ Error: Forbidden (Check Cookies)";
-        try { await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, `${errorMsg}\n\nLog: <code>${e.message.substring(0, 50)}</code>`, { parse_mode: 'HTML' }); } 
-        catch { await ctx.reply(errorMsg); }
-        if (finalFile && fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
-    }
-};
-
-const handleMessage = async (ctx) => {
-    db.addUser(ctx);
-    const messageText = ctx.message.text;
-    if (!messageText) return; 
-    const match = messageText.match(config.URL_REGEX);
-    if (!match) return;
-
-    const inputUrl = match[0];
-    const parts = messageText.split(inputUrl);
-    const preText = parts[0].trim(); 
-    const postText = parts[1].trim(); 
-    let flagEmoji = (preText.length === 2 && /^[a-zA-Z]+$/.test(preText)) ? getFlagEmoji(preText) : '🇧🇩';
-
-    const msg = await ctx.reply("🔍 *Analyzing media...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
-
-    try {
-        const fullUrl = await resolveRedirect(inputUrl);
-        let media = null;
-        let platformName = 'Social';
-
-        if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
-            platformName = 'Twitter';
-            try {
-                const info = await downloader.getInfo(fullUrl);
-                // Image vs Video detection fix
-                const isVideo = (info.vcodec && info.vcodec !== 'none') || info.ext === 'gif';
-                media = { title: info.title || 'Twitter Media', source: fullUrl, type: isVideo ? 'video' : 'image', url: info.url, thumbnail: info.thumbnail, formats: info.formats || [] };
-            } catch (e) { 
-                const mirrorUrl = fullUrl.replace('x.com', 'vxtwitter.com').replace('twitter.com', 'vxtwitter.com');
-                media = { title: "Twitter Media", source: fullUrl, type: 'image', url: mirrorUrl };
-            }
-        } else if (fullUrl.includes('reddit.com') || fullUrl.includes('redd.it')) {
-            media = await redditService.extract(fullUrl);
-            platformName = 'Reddit';
-        } else {
-            if (fullUrl.includes('instagram.com')) platformName = 'Instagram';
-            if (fullUrl.includes('tiktok.com')) platformName = 'TikTok';
-            try {
-                const info = await downloader.getInfo(fullUrl);
-                media = { title: info.title || 'Social Video', source: fullUrl, type: 'video', url: fullUrl, thumbnail: info.thumbnail, formats: info.formats || [] };
-            } catch (e) { media = { title: 'Video', source: fullUrl, type: 'video', formats: [] }; }
-        }
-
-        if (!media) throw new Error("Media not found");
-
-        const prettyCaption = generateCaption(postText || media.title, platformName, media.source, flagEmoji);
-        const buttons = [];
-        if (media.type === 'video') {
-            if (media.formats && media.formats.length > 0) {
-                const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height);
-                const seen = new Set();
-                formats.slice(0, 5).forEach(f => {
-                    if(!seen.has(f.height)) { seen.add(f.height); buttons.push([Markup.button.callback(`📹 ${f.height}p`, `vid|${f.format_id}`)]); }
-                });
-            }
-            buttons.push([Markup.button.callback("📹 Best Quality", "vid|best"), Markup.button.callback("🎵 Audio Only", "aud|best")]);
-        }
-        else if (media.type === 'image') buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
-        else if (media.type === 'gallery') buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
-
-        const menuMarkup = Markup.inlineKeyboard([...buttons, ...getTranslationButtons().reply_markup.inline_keyboard]);
-
-        if (media.thumbnail || media.type === 'image') {
-            await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(()=>{});
-            await ctx.replyWithPhoto(media.url || media.thumbnail, { caption: prettyCaption, parse_mode: 'HTML', ...menuMarkup });
-        } else {
-            await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, prettyCaption, { parse_mode: 'HTML', ...menuMarkup });
-        }
-
-    } catch (e) { await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed: " + e.message); }
-};
-
-// --- NICKNAME & GROUP HANDLER ---
-const handleGroupMessage = async (ctx, next) => {
-    if (!ctx.message || !ctx.message.text) return next();
-    const messageText = ctx.message.text;
-
-    if (messageText.startsWith('/setnick')) {
-        const parts = messageText.split(' ');
-        if (parts.length < 2 || !ctx.message.reply_to_message) return ctx.reply("Usage: Reply to user + /setnick name");
-        await db.setNickname(ctx.chat.id, parts[1].toLowerCase(), ctx.message.reply_to_message.from.id);
-        return ctx.reply(`✅ Saved Nickname: <b>${parts[1]}</b>`, { parse_mode: 'HTML' });
-    }
-    if (messageText.startsWith('/delnick')) {
-        const parts = messageText.split(' ');
-        if (parts.length < 2) return ctx.reply("Usage: /delnick name");
-        await db.deleteNickname(ctx.chat.id, parts[1].toLowerCase());
-        return ctx.reply(`🗑 Deleted Nickname: <b>${parts[1]}</b>`, { parse_mode: 'HTML' });
-    }
-    
-    // Check if message is a saved nickname
-    const nickEntry = await db.getNickname(ctx.chat.id, messageText.trim().toLowerCase());
-    if (nickEntry) {
-        try { await ctx.deleteMessage().catch(()=>{}); } catch(e){}
-        await ctx.reply(`👋 <b>${ctx.from.first_name}</b> mentioned <a href="tg://user?id=${nickEntry.targetId}">User</a>`, { parse_mode: 'HTML' });
-        return;
-    }
-    return next();
-};
-
-const handleCallback = async (ctx) => {
-    db.addUser(ctx);
-    const [action, id] = ctx.callbackQuery.data.split('|');
-    if (action === 'help_msg') return handleHelp(ctx);
-    if (action === 'start_msg') return handleStart(ctx);
-    if (action === 'stats_msg') return ctx.answerCbQuery("Use /stats command", { show_alert: true });
-    
-    const entities = ctx.callbackQuery.message.caption_entities || ctx.callbackQuery.message.entities;
-    const url = entities?.find(e => e.type === 'text_link')?.url;
-
-    if (action === 'trans') {
-        const msg = ctx.callbackQuery.message.caption;
-        if (!msg) return ctx.answerCbQuery("No text to translate");
-        await ctx.answerCbQuery("Translating...");
         try {
-            const body = msg.split('\n').slice(2).join('\n') || msg;
-            const res = await translate(body, { to: id, autoCorrect: true });
-            await ctx.editMessageCaption(generateCaption(res.text, 'Social', url || 'source', '🇧🇩'), { parse_mode: 'HTML', ...getTranslationButtons() });
-        } catch(e) { await ctx.answerCbQuery("Translation Error"); }
-        return;
-    }
+            const userConfig = await db.getAdminConfig(config.ADMIN_ID);
+            const targetId = userConfig?.twitterConfig?.webhookTarget || config.ADMIN_ID;
 
-    if (!url) return ctx.answerCbQuery("Expired. Please send the link again.");
-    if (action === 'img') { 
-        await ctx.answerCbQuery("Sending Image..."); 
-        await ctx.replyWithPhoto(url).catch(() => ctx.replyWithDocument(url)); 
-        await ctx.deleteMessage().catch(()=>{}); 
-    }
-    else await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, ctx.callbackQuery.message.caption, null);
+            const mockCtx = {
+                from: { id: config.ADMIN_ID, first_name: 'Admin' },
+                chat: { id: targetId },
+                message: { text: url, message_id: 0, from: { id: config.ADMIN_ID } },
+                reply: (text, extra) => bot.telegram.sendMessage(targetId, text, extra),
+                telegram: bot.telegram,
+                answerCbQuery: () => Promise.resolve(),
+                replyWithVideo: (v, e) => bot.telegram.sendVideo(targetId, v, e),
+                replyWithAudio: (a, e) => bot.telegram.sendAudio(targetId, a, e),
+                replyWithPhoto: (p, e) => bot.telegram.sendPhoto(targetId, p, e),
+                replyWithDocument: (d, e) => bot.telegram.sendDocument(targetId, d, e),
+                editMessageMedia: (media, extra) => bot.telegram.sendVideo(targetId, media.media.source, { caption: media.caption, parse_mode: 'HTML' }) 
+            };
+
+            await handlers.handleMessage(mockCtx);
+        } catch (e) { console.error("Trigger Error:", e); }
+    });
+
+    // ৪. THE HACKER TERMINAL (UI)
+    app.get('/', (req, res) => {
+        res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Media Banai - Live Console</title>
+            <style>
+                body { background-color: #0d1117; color: #c9d1d9; font-family: 'Consolas', monospace; padding: 20px; font-size: 13px; margin: 0; }
+                h1 { color: #58a6ff; font-size: 18px; border-bottom: 1px solid #30363d; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+                .status { font-size: 12px; background: #238636; color: white; padding: 2px 8px; border-radius: 12px; }
+                #logs { white-space: pre-wrap; word-wrap: break-word; height: 85vh; overflow-y: auto; padding-bottom: 50px; }
+                .log-entry { margin-bottom: 4px; display: flex; line-height: 1.5; border-bottom: 1px solid #161b22; }
+                .timestamp { color: #8b949e; min-width: 90px; }
+                .type-INFO { color: #3fb950; font-weight: bold; min-width: 50px; }
+                .type-ERROR { color: #f85149; font-weight: bold; min-width: 50px; }
+            </style>
+        </head>
+        <body>
+            <h1><span>🚀 Media Banai Live</span> <span class="status">● Online</span></h1>
+            <div id="logs">Connecting...</div>
+            <script>
+                async function fetchLogs() {
+                    try {
+                        const res = await fetch('/api/logs');
+                        const data = await res.json();
+                        const logBox = document.getElementById('logs');
+                        logBox.innerHTML = data.map(log => \`
+                            <div class="log-entry">
+                                <span class="timestamp">[\${log.time}]</span>
+                                <span class="type-\${log.type}">\${log.type}</span>
+                                <span class="msg">\${log.message}</span>
+                            </div>\`).join('');
+                        window.scrollTo(0, document.body.scrollHeight);
+                    } catch (e) {}
+                }
+                setInterval(fetchLogs, 2000);
+                fetchLogs();
+            </script>
+        </body>
+        </html>`);
+    });
+
+    // ৫. সার্ভার লিসেনিং (Conflict Fix)
+    app.listen(config.PORT, '0.0.0.0', () => {
+        console.log("🚀 Server listening on port " + config.PORT);
+    });
+
+    // ৬. Keep-alive লজিক (Fixed Syntax)
+    const keepAlive = () => { 
+        if (config.APP_URL) {
+            axios.get(config.APP_URL + "/api/logs").catch(() => {}); 
+        }
+    };
+    setInterval(keepAlive, 600000);
 };
 
-module.exports = { 
-    handleMessage, handleCallback, handleGroupMessage, handleStart, handleHelp, performDownload, handleConfig, handleEditCaption 
-};
+module.exports = { setupServer };
