@@ -2,7 +2,7 @@ const { Markup } = require('telegraf');
 const config = require('../config/settings');
 const extractor = require('../services/extractors');
 const { resolveRedirect } = require('../utils/helpers');
-const downloader = require('../utils/downloader'); // thumbnail এর জন্য প্রয়োজন
+const downloader = require('../utils/downloader');
 
 const generateCaption = (text, platform, sourceUrl) => {
     const cleanText = text ? text.trim() : "Media Content";
@@ -25,7 +25,7 @@ const handleMessage = async (ctx) => {
         let media = await extractor.extract(fullUrl);
         if (!media) throw new Error("Media not found");
 
-        // --- Thumbnail Recovery (If service doesn't provide it) ---
+        // Twitter-এর ক্ষেত্রে অনেক সময় থামনেইল না থাকলে yt-dlp থেকে নেওয়ার চেষ্টা
         if (!media.thumbnail && (fullUrl.includes('x.com') || fullUrl.includes('twitter'))) {
             try {
                 const info = await downloader.getInfo(fullUrl);
@@ -58,7 +58,7 @@ const handleMessage = async (ctx) => {
 
         const menu = Markup.inlineKeyboard(buttons);
 
-        // --- Thumbnail Logic (Show photo instead of text if available) ---
+        // যদি থামনেইল থাকে তবে ফটো হিসেবে প্রিভিউ পাঠাবে
         if (media.thumbnail) {
             await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(()=>{});
             await ctx.replyWithPhoto(media.thumbnail, { caption: htmlCaption, parse_mode: 'HTML', ...menu });
