@@ -12,14 +12,13 @@ const setupServer = (bot, webhookPath) => {
     app.use(express.json());
     app.use(express.urlencoded({ extended: true }));
 
-    // ১. ওয়েববুক কলব্যাক হ্যান্ডলার (রেলওয়ের জন্য সবচেয়ে গুরুত্বপূর্ণ)
-    // এটি নিশ্চিত করে যে একই পোর্টে বট এবং ওয়েব কনসোল চলবে
+    // ১. ওয়েববুক কলব্যাক হ্যান্ডলার (রেলওয়ের জন্য)
     if (process.env.NODE_ENV === 'production' && webhookPath) {
         app.use(bot.webhookCallback(webhookPath));
-        console.log(`📡 Webhook Callback attached to: ${webhookPath}`);
+        console.log("📡 Webhook Callback attached to: " + webhookPath);
     }
 
-    // ২. API Endpoint for Logs (Used by Terminal)
+    // ২. API Endpoint for Logs
     app.get('/api/logs', (req, res) => {
         res.json(logger.getLogs());
     });
@@ -33,7 +32,6 @@ const setupServer = (bot, webhookPath) => {
         const url = query.url || body.url;
 
         if (String(secret) !== String(config.ADMIN_ID)) {
-            console.log(`⚠️ Webhook Access Denied. Wrong Secret.`);
             return res.status(403).send('❌ Access Denied');
         }
 
@@ -73,7 +71,7 @@ const setupServer = (bot, webhookPath) => {
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>Media Banai - Live Console</title>
             <style>
-                body { background-color: #0d1117; color: #c9d1d9; font-family: 'Consolas', 'Courier New', monospace; padding: 20px; font-size: 13px; margin: 0; }
+                body { background-color: #0d1117; color: #c9d1d9; font-family: 'Consolas', monospace; padding: 20px; font-size: 13px; margin: 0; }
                 h1 { color: #58a6ff; font-size: 18px; border-bottom: 1px solid #30363d; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
                 .status { font-size: 12px; background: #238636; color: white; padding: 2px 8px; border-radius: 12px; }
                 #logs { white-space: pre-wrap; word-wrap: break-word; height: 85vh; overflow-y: auto; padding-bottom: 50px; }
@@ -109,13 +107,16 @@ const setupServer = (bot, webhookPath) => {
     });
 
     // ৫. সার্ভার লিসেনিং (Conflict Fix)
-    // শুধুমাত্র একবারই app.listen কল হবে
     app.listen(config.PORT, '0.0.0.0', () => {
-        console.log(`🚀 Server listening on port ${config.PORT}`);
+        console.log("🚀 Server listening on port " + config.PORT);
     });
 
-    // Keep-alive লজিক
-    const keepAlive = () => { if (config.APP_URL) axios.get(\`\${config.APP_URL}/api/logs\`).catch(()=>{}); };
+    // ৬. Keep-alive লজিক (Fixed Syntax)
+    const keepAlive = () => { 
+        if (config.APP_URL) {
+            axios.get(config.APP_URL + "/api/logs").catch(() => {}); 
+        }
+    };
     setInterval(keepAlive, 600000);
 };
 
