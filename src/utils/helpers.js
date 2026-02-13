@@ -1,9 +1,10 @@
-// File: src/utils/helpers.js
 const axios = require('axios');
 const config = require('../config/settings');
 
 const resolveRedirect = async (url) => {
-    if (!url.includes('/s/')) return url;
+    // Skip TikTok short links (handled by API)
+    if (!url.includes('/s/') && !url.includes('vm.tiktok') && !url.includes('vt.tiktok')) return url;
+    
     try {
         const res = await axios.head(url, {
             maxRedirects: 0,
