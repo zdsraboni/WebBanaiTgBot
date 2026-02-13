@@ -3,6 +3,25 @@ const config = require('../config/settings');
 const extractor = require('../services/extractors');
 const { resolveRedirect } = require('../utils/helpers');
 
+// --- Helper: Caption Formatter ---
+const getCaption = (media, url) => {
+    // 1. Identify Platform
+    let platform = 'Social';
+    if (url.includes('reddit')) platform = 'Reddit';
+    else if (url.includes('x.com') || url.includes('twitter')) platform = 'Twitter';
+    else if (url.includes('tiktok')) platform = 'TikTok';
+    else if (url.includes('instagram')) platform = 'Instagram';
+
+    // 2. Sanitize Text for HTML (Prevent errors)
+    const cleanTitle = (media.title || 'No Caption')
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+
+    // 3. Return Layout
+    return `<b>🎬 ${platform} Media</b> | <a href="${url}">Source</a>\n\n<blockquote>${cleanTitle}</blockquote>`;
+};
+
 const handleMessage = async (ctx) => {
     const match = ctx.message.text.match(config.URL_REGEX);
     if (!match) return;
@@ -17,12 +36,13 @@ const handleMessage = async (ctx) => {
         if (!media) throw new Error("Media not found");
 
         const buttons = [];
-        let text = `✅ *${(media.title).substring(0, 50)}...*`;
+        
+        // Use the new Caption Format
+        const captionText = getCaption(media, fullUrl);
 
         // 1. Gallery
         if (media.type === 'gallery') {
-            text += `\n📚 **Album:** ${media.items.length} items`;
-            buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
+            buttons.push([Markup.button.callback(`📥 Download Album (${media.items.length})`, `alb|all`)]);
         } 
         // 2. Image
         else if (media.type === 'image') {
@@ -30,7 +50,6 @@ const handleMessage = async (ctx) => {
         } 
         // 3. Video
         else if (media.type === 'video') {
-            // Qualities
             if (media.formats?.length > 0 && !fullUrl.includes('tiktok') && !fullUrl.includes('instagram')) {
                 const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height).slice(0, 5);
                 formats.forEach(f => {
@@ -41,14 +60,15 @@ const handleMessage = async (ctx) => {
             if (buttons.length === 0) buttons.push([Markup.button.callback("📹 Download Video", `vid|best`)]);
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
-
-        // Store Safe URL
-        const safeUrl = (media.type === 'video' && media.url) ? media.url : (media.source || fullUrl);
         
         await ctx.telegram.editMessageText(
             ctx.chat.id, msg.message_id, null,
-            `${text}\n[Source](${safeUrl})`,
-            { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
+            captionText, // New HTML Caption
+            { 
+                parse_mode: 'HTML', // Changed to HTML for blockquote support
+                disable_web_page_preview: true,
+                ...Markup.inlineKeyboard(buttons) 
+            }
         );
 
     } catch (e) {
