@@ -7,7 +7,6 @@ const db = require('./db');
 const { resolveRedirect } = require('./helpers'); 
 const downloader = require('./downloader');
 const redditService = require('../services/reddit');
-const twitterService = require('../services/twitter');
 
 // --- HELPERS ---
 const getFlagEmoji = (code) => {
@@ -21,30 +20,12 @@ const generateCaption = (text, platform, sourceUrl, flagEmoji) => {
     return `🎬 <b>${platform} media</b> | <a href="${sourceUrl}">source</a> ${flagEmoji || '🇧🇩'}\n\n<blockquote>${safeText}</blockquote>`;
 };
 
-const getTranslationButtons = () => Markup.inlineKeyboard([[Markup.button.callback('🇺🇸 English', 'trans|en'), Markup.button.callback('🇧🇩 Bangla', 'trans|bn')]]);
+const getTranslationButtons = () => Markup.inlineKeyboard([[
+    Markup.button.callback('🇺🇸 English', 'trans|en'), 
+    Markup.button.callback('🇧🇩 Bangla', 'trans|bn')
+]]);
 
-// --- HANDLERS ---
-const handleStart = async (ctx) => {
-    db.addUser(ctx);
-    const text = `👋 <b>Welcome!</b>\nTwitter, Reddit, Instagram & TikTok support ✅\n• Auto-Split 50MB+\n• Image/Video/GIF/Album`;
-    const buttons = Markup.inlineKeyboard([[Markup.button.callback('📚 Help', 'help_msg'), Markup.button.callback('📊 Stats', 'stats_msg')]]);
-    if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{});
-    else await ctx.reply(text, { parse_mode: 'HTML', ...buttons });
-};
-
-const handleEditCaption = async (ctx) => {
-    const text = ctx.message.text;
-    if (!text?.startsWith('/caption') || !ctx.message.reply_to_message) return false;
-    const newCaption = text.replace(/^\/caption\s*/, '').trim();
-    if (!newCaption) return true;
-    try {
-        await ctx.telegram.editMessageCaption(ctx.chat.id, ctx.message.reply_to_message.message_id, null, newCaption, { parse_mode: 'HTML', reply_markup: ctx.message.reply_to_message.reply_markup });
-        await ctx.deleteMessage().catch(()=>{});
-    } catch (e) {}
-    return true;
-};
-
-// --- CORE DOWNLOADER ---
+// --- CORE LOGIC ---
 const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionText) => {
     let finalFile = "";
     try {
@@ -55,27 +36,23 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
 
         await downloader.download(url, isAudio, qualityId, basePath);
         
-        let filesToSend = [finalFile];
         if (fs.existsSync(finalFile)) {
             const stats = fs.statSync(finalFile);
             if (!isAudio && stats.size > 49.5 * 1024 * 1024) {
-                await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⚠️ <b>Splitting large file...</b>", { parse_mode: 'HTML' }).catch(()=>{});
-                filesToSend = await downloader.splitFile(finalFile);
+                const parts = await downloader.splitFile(finalFile);
+                for (let i = 0; i < parts.length; i++) {
+                    await ctx.replyWithVideo({ source: parts[i] }, { caption: `${captionText} (Part ${i+1})`, parse_mode: 'HTML' });
+                    if (fs.existsSync(parts[i])) fs.unlinkSync(parts[i]);
+                }
+            } else {
+                const extra = { caption: captionText, parse_mode: 'HTML', ...getTranslationButtons() };
+                isAudio ? await ctx.replyWithAudio({ source: finalFile }, extra) : await ctx.replyWithVideo({ source: finalFile }, extra);
             }
+            await ctx.telegram.deleteMessage(ctx.chat.id, botMsgId).catch(()=>{});
+            if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
         }
-
-        for (let i = 0; i < filesToSend.length; i++) {
-            const file = filesToSend[i];
-            const cap = i === 0 ? captionText : `${captionText}\n\n🧩 <b>Part ${i + 1}</b>`;
-            if (isAudio) await ctx.replyWithAudio({ source: file }, { caption: cap, parse_mode: 'HTML' });
-            else await ctx.replyWithVideo({ source: file }, { caption: cap, parse_mode: 'HTML' });
-            if (fs.existsSync(file)) fs.unlinkSync(file);
-        }
-        await ctx.telegram.deleteMessage(ctx.chat.id, botMsgId).catch(()=>{});
-        db.incrementDownloads(ctx.from?.id);
     } catch (e) {
-        await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, `❌ Failed: ${e.message.substring(0, 50)}`, { parse_mode: 'HTML' }).catch(()=>{});
-        if (finalFile && fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
+        await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, `❌ <b>Failed:</b> ${e.message.substring(0, 50)}`, { parse_mode: 'HTML' }).catch(()=>{});
     }
 };
 
@@ -96,25 +73,20 @@ const handleMessage = async (ctx) => {
 
         if (fullUrl.includes('twitter.com') || fullUrl.includes('x.com')) {
             platform = "Twitter";
-            try {
-                const info = await downloader.getInfo(fullUrl);
-                media = { title: info.title, source: fullUrl, type: info.is_image ? 'image' : 'video', url: info.url, thumbnail: info.thumbnail };
-            } catch (e) { 
-                media = { title: "Twitter Media", source: fullUrl, type: 'image', url: fullUrl.replace('twitter.com', 'vxtwitter.com').replace('x.com', 'vxtwitter.com') };
-            }
+            media = await downloader.getInfo(fullUrl);
         } else if (fullUrl.includes('reddit.com')) {
-            media = await redditService.extract(fullUrl);
             platform = "Reddit";
+            media = await redditService.extract(fullUrl);
         } else {
             const info = await downloader.getInfo(fullUrl);
-            media = { title: info.title, source: fullUrl, type: 'video', url: fullUrl, thumbnail: info.thumbnail };
+            media = { title: info.title, source: fullUrl, type: 'video', url: fullUrl };
         }
 
         const caption = generateCaption(postText || media.title, platform, fullUrl, '🇧🇩');
-        const buttons = media.type === 'video' ? [[Markup.button.callback("📹 Download Video", `vid|best`), Markup.button.callback("🎵 Audio", `aud|best`)]] : [[Markup.button.callback("🖼 Download Image", `img|single`)]];
+        const buttons = media.type === 'video' ? [[Markup.button.callback("📹 Video", `vid|best`), Markup.button.callback("🎵 Audio", `aud|best`)]] : [[Markup.button.callback("🖼 Download Image", `img|single`)]];
         const markup = Markup.inlineKeyboard([...buttons, ...getTranslationButtons().reply_markup.inline_keyboard]);
 
-        if (media.type === 'image') {
+        if (media.type === 'image' || media.is_image) {
             const imgPath = path.join(config.DOWNLOAD_DIR, `img_${Date.now()}.jpg`);
             await downloader.downloadGeneric(media.url, imgPath);
             await ctx.replyWithPhoto({ source: imgPath }, { caption, parse_mode: 'HTML', ...markup });
@@ -124,42 +96,22 @@ const handleMessage = async (ctx) => {
             await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, caption, { parse_mode: 'HTML', ...markup });
         }
     } catch (e) { 
-        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, `❌ <b>Error:</b> ${e.message}`, { parse_mode: 'HTML' }).catch(()=>{}); 
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, `❌ <b>Error:</b> Media not found.`).catch(()=>{}); 
     }
 };
 
-const handleGroupMessage = async (ctx, next) => {
-    if (!ctx.message?.text) return next();
-    const text = ctx.message.text;
-    if (text.startsWith('/setnick')) {
-        const parts = text.split(' ');
-        if (parts.length < 2 || !ctx.message.reply_to_message) return ctx.reply("Usage: Reply + /setnick name");
-        await db.setNickname(ctx.chat.id, parts[1].toLowerCase(), ctx.message.reply_to_message.from.id);
-        return ctx.reply("✅ Nickname set!");
-    }
-    const nick = await db.getNickname(ctx.chat.id, text.trim().toLowerCase());
-    if (nick) return ctx.reply(`👋 <b>${ctx.from.first_name}</b> mentioned <a href="tg://user?id=${nick.targetId}">User</a>`, { parse_mode: 'HTML' });
-    return next();
-};
-
-const handleConfig = async (ctx) => {
-    if (String(ctx.from.id) !== String(config.ADMIN_ID)) return;
-    const text = ctx.message.text;
-    if (text.startsWith('/set_destination')) {
-        let targetId = text.includes('reset') ? "" : ctx.chat.id;
-        await db.setWebhookTarget(config.ADMIN_ID, targetId);
-        return ctx.reply(`✅ Target updated.`);
-    }
-    if (text.startsWith('/mode')) {
-        const mode = text.split(' ')[1];
-        await db.toggleMode(ctx.from.id, mode);
-        return ctx.reply(`🔄 Mode: ${mode}`);
-    }
+// --- SYSTEM HANDLERS ---
+const handleStart = async (ctx) => {
+    db.addUser(ctx);
+    const text = `👋 <b>Welcome!</b>\nTwitter, Reddit, Instagram & TikTok support ✅`;
+    const buttons = Markup.inlineKeyboard([[Markup.button.callback('📚 Help', 'help_msg'), Markup.button.callback('📊 Stats', 'stats_msg')]]);
+    ctx.callbackQuery ? await ctx.editMessageText(text, { parse_mode: 'HTML', ...buttons }).catch(()=>{}) : await ctx.reply(text, { parse_mode: 'HTML', ...buttons });
 };
 
 const handleCallback = async (ctx) => {
     const [action, id] = ctx.callbackQuery.data.split('|');
-    if (action === 'help_msg') return handleStart(ctx);
+    if (action === 'start_msg') return handleStart(ctx);
+    
     const entities = ctx.callbackQuery.message.caption_entities || ctx.callbackQuery.message.entities;
     const url = entities?.find(e => e.type === 'text_link')?.url;
     if (!url) return ctx.answerCbQuery("❌ Link not found");
@@ -168,13 +120,17 @@ const handleCallback = async (ctx) => {
         await ctx.answerCbQuery("🚀 Processing...");
         await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, ctx.callbackQuery.message.caption);
     } else if (action === 'img') {
-        await ctx.answerCbQuery("Sending...");
+        await ctx.answerCbQuery("Sending Image...");
         const imgPath = path.join(config.DOWNLOAD_DIR, `img_${Date.now()}.jpg`);
         await downloader.downloadGeneric(url, imgPath);
-        await ctx.replyWithPhoto({ source: imgPath });
+        await ctx.replyWithPhoto({ source: imgPath }).catch(() => ctx.replyWithDocument({ source: imgPath }));
         if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath);
-        await ctx.deleteMessage().catch(()=>{});
     }
 };
 
-module.exports = { handleMessage, handleCallback, handleGroupMessage, handleStart, handleEditCaption, handleConfig, performDownload };
+module.exports = { 
+    handleMessage, handleCallback, handleStart, performDownload,
+    handleHelp: (ctx) => ctx.reply("📚 Use /start to see features."),
+    handleConfig: (ctx) => ctx.reply("⚙️ Admin config active."),
+    handleEditCaption: () => false
+};
