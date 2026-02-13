@@ -106,7 +106,7 @@ const handleEditCaption = async (ctx) => {
     return true;
 };
 
-// --- DOWNLOADER (এই লাইনের নিচ থেকে শুরু করুন) ---
+// --- DOWNLOADER ---
 const performDownload = async (ctx, url, type, qualityId, botMsgId, htmlCaption, userMsgId) => {
     let basePath = ''; // ফিক্স: এখানে ডিক্লেয়ার করা হয়েছে যাতে catch ব্লক এটি দেখতে পায়
     try {
@@ -127,6 +127,7 @@ const performDownload = async (ctx, url, type, qualityId, botMsgId, htmlCaption,
         
         const finalFile = `${basePath}.${ext}`;
 
+        // ডাউনলোডার কল করা
         await downloader.download(url, type, qualityId, basePath);
 
         let filesToSend = [finalFile];
@@ -170,25 +171,30 @@ const performDownload = async (ctx, url, type, qualityId, botMsgId, htmlCaption,
         if (userId) db.incrementDownloads(userId);
 
     } catch (e) {
+        console.error("CRITICAL DOWNLOAD ERROR:", e); // লগ দেখার জন্য
+
         let errorMsg = "❌ Error/Timeout.";
         if (e.message.includes('403')) errorMsg = "❌ Error: Forbidden (Check Cookies)";
-        if (e.message.includes('Sign in')) errorMsg = "❌ Error: Login Required (Check Cookies)";
+        else if (e.message.includes('Sign in')) errorMsg = "❌ Error: Login Required";
         
         try { 
-            await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, `${errorMsg}\n\nLog: \`${e.message.substring(0, 50)}...\``, { parse_mode: 'Markdown' }); 
+            await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, 
+                `${errorMsg}\n\n<b>Detail:</b> <code>${e.message.substring(0, 100)}</code>`, 
+                { parse_mode: 'HTML' }
+            ); 
         } catch { 
-            await ctx.reply(`${errorMsg}`, { parse_mode: 'Markdown' }); 
+            await ctx.reply(`${errorMsg}`, { parse_mode: 'HTML' }); 
         }
         
-        // ফিক্স: basePath ডিফাইন করা থাকলে ফাইল ক্লিনআপ করা
+        // ফিক্স: এরর হলেও ফাইল ডিলিট করার ব্যবস্থা
         if (basePath) {
-            if (fs.existsSync(`${basePath}.mp4`)) fs.unlinkSync(`${basePath}.mp4`);
-            if (fs.existsSync(`${basePath}.jpg`)) fs.unlinkSync(`${basePath}.jpg`);
-            if (fs.existsSync(`${basePath}.mp3`)) fs.unlinkSync(`${basePath}.mp3`);
+            const possibleExts = ['.mp4', '.jpg', '.mp3'];
+            possibleExts.forEach(ext => {
+                if (fs.existsSync(basePath + ext)) fs.unlinkSync(basePath + ext);
+            });
         }
     }
 };
-// --- এখানে শেষ (এর নিচেই handleMessage ফাংশন শুরু হবে) ---
 
 const handleMessage = async (ctx) => {
     db.addUser(ctx);
