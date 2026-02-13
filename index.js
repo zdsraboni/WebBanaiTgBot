@@ -4,13 +4,13 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 
-// ভার্সন এবং কনফিগ ইমপোর্ট
+// Import Version & Config
 const { version } = require('./package.json');
 const config = require('./src/config/settings');
 const logger = require('./src/utils/logger');
 const downloader = require('./src/utils/downloader');
 
-// সার্ভিস ইমপোর্ট
+// Import Services
 const redditService = require('./src/services/reddit');
 const twitterService = require('./src/services/twitter');
 
@@ -19,10 +19,9 @@ logger.init();
 const bot = new Telegraf(config.BOT_TOKEN);
 const app = express();
 
-// ডাউনলোড ডিরেক্টরি চেক
 if (!fs.existsSync(config.DOWNLOAD_DIR)) fs.mkdirSync(config.DOWNLOAD_DIR, { recursive: true });
 
-// রিডাইরেক্ট ইউআরএল হ্যান্ডলার
+// --- HELPERS ---
 const resolveRedirect = async (url) => {
     if (!url.includes('/s/')) return url;
     try {
@@ -31,8 +30,13 @@ const resolveRedirect = async (url) => {
     } catch (e) { return url; }
 };
 
-// --- হ্যান্ডলার: নতুন মেসেজ ---
-bot.start((ctx) => ctx.reply(`👋 **Media Banai Bot v${version}**\n\nলিংক এবং এরপর স্পেস দিয়ে আপনার পছন্দের ক্যাপশন লিখুন (ঐচ্ছিক)।`));
+// HTML স্পেশাল ক্যারেক্টার ফিল্টার করার ফাংশন (এরর এড়াতে)
+const escapeHTML = (text) => {
+    return text ? text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : "";
+};
+
+// --- HANDLER: MESSAGE ---
+bot.start((ctx) => ctx.reply(`👋 **Media Banai Bot v${version}**\n\nলিংক এবং এরপর আপনার ক্যাপশন লিখে পাঠাতে পারেন।`));
 
 bot.on('text', async (ctx) => {
     const fullText = ctx.message.text;
@@ -40,8 +44,7 @@ bot.on('text', async (ctx) => {
     if (!match) return;
 
     const inputUrl = match[0];
-    
-    // ১. কাস্টম ক্যাপশন আলাদা করা (না থাকলে "null" সেট করা)
+    // ১. ইউজার ক্যাপশন না দিলে "null" স্ট্রিং সেট হবে
     const userCustomCaption = fullText.replace(inputUrl, '').trim() || "null";
 
     console.log(`📩 New Request: ${inputUrl}`);
@@ -51,7 +54,6 @@ bot.on('text', async (ctx) => {
         const fullUrl = await resolveRedirect(inputUrl);
         let media = null;
 
-        // প্ল্যাটফর্ম অনুযায়ী ডাটা সংগ্রহ
         if (fullUrl.includes('x.com') || fullUrl.includes('twitter.com')) {
             media = await twitterService.extract(fullUrl);
         } else {
@@ -60,22 +62,22 @@ bot.on('text', async (ctx) => {
 
         if (!media) throw new Error("Media not found");
 
-        // --- ২. কন্ডিশনাল ক্যাপশন লজিক ---
-        let finalDisplayCaption;
+        // ২. ডাইনামিক ক্যাপশন লজিক ("null" কন্ডিশন)
+        let finalCaptionText;
         if (userCustomCaption === "null") {
-            // যদি ইউজার ক্যাপশন না দেয়, তবে পোস্টের আসল টাইটেল ব্যবহার হবে
-            finalDisplayCaption = media.title || "Uploaded ✅";
+            // যদি কাস্টম ক্যাপশন না থাকে, পোস্টের টাইটেল ব্যবহার হবে
+            finalCaptionText = media.title || "Uploaded ✅";
         } else {
-            // ইউজার যা লিখেছে সেটিই থাকবে
-            finalDisplayCaption = userCustomCaption;
+            // ইউজার যা লিখেছে সেটাই থাকবে
+            finalCaptionText = userCustomCaption;
         }
 
-        const buttons = [];
-        let text = `✅ *${(media.title || "Media").substring(0, 50)}...*`;
+        // ৩. UI ডিজাইন: Quote ব্লকের ভেতরে ক্যাপশন সাজানো
+        const safeCaption = escapeHTML(finalCaptionText);
+        const htmlLayout = `<b>🎬 Media Content</b>\n\n<blockquote>${safeCaption}</blockquote>`;
 
-        // বাটন জেনারেশন
+        const buttons = [];
         if (media.type === 'gallery') {
-            text += `\n📚 **Gallery:** ${media.items.length} items`;
             buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
         } 
         else if (media.type === 'image') {
@@ -93,10 +95,10 @@ bot.on('text', async (ctx) => {
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
 
-        // ৩. মেসেজে ক্যাপশনটি লুকিয়ে রাখা (📝 Caption: ট্যাগ দিয়ে)
+        // এনালাইজিং মেসেজ আপডেট (parse_mode HTML করা হয়েছে)
         await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, 
-            `${text}\n\n[🔗 Source](${media.url || media.source})\n\n📝 *Caption:* ${finalDisplayCaption}`, 
-            { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
+            `${htmlLayout}\n\n<a href="${media.url || media.source}">🔗 Source Link</a>\n\n📝 Caption: ${finalCaptionText}`, 
+            { parse_mode: 'HTML', disable_web_page_preview: true, ...Markup.inlineKeyboard(buttons) }
         );
 
     } catch (e) {
@@ -105,22 +107,24 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// --- হ্যান্ডলার: বাটন ক্লিক (Callbacks) ---
+// --- HANDLER: CALLBACKS ---
 bot.on('callback_query', async (ctx) => {
     const [action, id] = ctx.callbackQuery.data.split('|');
     const messageText = ctx.callbackQuery.message.text || "";
     
+    // ৪. সোর্স লিংক এবং ক্যাপশন ডাটা রিকভারি
     const url = ctx.callbackQuery.message.entities?.find(e => e.type === 'text_link')?.url;
-    
-    // ৪. আগের মেসেজ থেকে ক্যাপশন উদ্ধার
     const captionMatch = messageText.match(/📝 Caption: (.*)/s);
     const finalCaption = captionMatch ? captionMatch[1] : "Uploaded ✅";
+    
+    // মিডিয়ার জন্য Quote UI ডিজাইন
+    const finalUI = `<blockquote>${escapeHTML(finalCaption)}</blockquote>`;
 
     if (!url) return ctx.answerCbQuery("❌ Expired");
 
     if (action === 'img') {
-        const sent = await ctx.replyWithPhoto(url, { caption: finalCaption });
-        if(!sent) await ctx.replyWithDocument(url, { caption: finalCaption });
+        const sent = await ctx.replyWithPhoto(url, { caption: finalUI, parse_mode: 'HTML' });
+        if(!sent) await ctx.replyWithDocument(url, { caption: finalUI, parse_mode: 'HTML' });
         await ctx.deleteMessage();
     } 
     else if (action === 'alb') {
@@ -134,16 +138,16 @@ bot.on('callback_query', async (ctx) => {
             for (const item of media.items) {
                 try { 
                     if(item.type==='video') 
-                        await ctx.replyWithVideo(item.url, { caption: finalCaption }); 
+                        await ctx.replyWithVideo(item.url, { caption: finalUI, parse_mode: 'HTML' }); 
                     else 
-                        await ctx.replyWithDocument(item.url, { caption: finalCaption }); 
+                        await ctx.replyWithDocument(item.url, { caption: finalUI, parse_mode: 'HTML' }); 
                 } catch {}
             }
         }
     } 
     else {
         await ctx.answerCbQuery("🚀 Downloading...");
-        await ctx.editMessageText(`⏳ *Downloading...*`, { parse_mode: 'Markdown' });
+        await ctx.editMessageText(`⏳ <b>Downloading...</b>`, { parse_mode: 'HTML' });
         
         const timestamp = Date.now();
         const basePath = path.join(config.DOWNLOAD_DIR, `${timestamp}`);
@@ -152,12 +156,12 @@ bot.on('callback_query', async (ctx) => {
 
         try {
             await downloader.download(url, isAudio, id, basePath);
-            await ctx.editMessageText("📤 *Uploading...*", { parse_mode: 'Markdown' });
+            await ctx.editMessageText("📤 <b>Uploading...</b>", { parse_mode: 'HTML' });
             
             if (isAudio) 
-                await ctx.replyWithAudio({ source: finalFile }, { caption: finalCaption });
+                await ctx.replyWithAudio({ source: finalFile }, { caption: finalUI, parse_mode: 'HTML' });
             else 
-                await ctx.replyWithVideo({ source: finalFile }, { caption: finalCaption });
+                await ctx.replyWithVideo({ source: finalFile }, { caption: finalUI, parse_mode: 'HTML' });
             
             await ctx.deleteMessage();
         } catch (e) { 
@@ -169,14 +173,14 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
-// --- সার্ভার স্টার্ট ---
+// --- SERVER ---
 if (process.env.NODE_ENV === 'production') {
     app.use(bot.webhookCallback('/bot'));
     bot.telegram.setWebhook(`${config.APP_URL}/bot`);
-    app.listen(config.PORT, '0.0.0.0', () => console.log(`🚀 Server running on ${config.PORT}`));
+    app.listen(config.PORT, '0.0.0.0', () => console.log(`🚀 Server on ${config.PORT}`));
 } else { 
     bot.launch(); 
-    console.log("🚀 Bot started in Polling mode");
+    console.log("🚀 Bot is Polling...");
 }
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
