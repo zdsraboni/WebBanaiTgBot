@@ -3,44 +3,32 @@ const config = require('../config/settings');
 const extractor = require('../services/extractors');
 const { resolveRedirect } = require('../utils/helpers');
 
-// --- Helper: Caption Generator ---
-const getCaption = (media, url, userCaption) => {
-    // 1. Identify Platform
-    let platform = 'Social';
-    if (url.includes('reddit')) platform = 'Reddit';
-    else if (url.includes('x.com') || url.includes('twitter')) platform = 'Twitter';
-    else if (url.includes('tiktok')) platform = 'TikTok';
-    else if (url.includes('instagram')) platform = 'Instagram';
-
-    // 2. Decide Caption Source (User input OR Original Title)
-    // If user provided text, use it. Otherwise use media title.
-    const finalCaptionText = userCaption ? userCaption : (media.title || 'No Caption');
-
-    // 3. Sanitize Text for HTML (Crucial to prevent errors)
-    const cleanTitle = finalCaptionText
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-
-    // 4. Return HTML Layout
-    return `<b>🎬 ${platform} Media</b> | <a href="${url}">Source</a>\n\n<blockquote>${cleanTitle}</blockquote>`;
+// --- HELPER: Caption Generator (From your idea) ---
+const generateCaption = (text, platform, sourceUrl) => {
+    // 1. Clean the text (Remove HTML tags if any to prevent breakage)
+    const cleanText = text ? text.trim() : "Media Content";
+    const safeText = cleanText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    
+    // 2. Format: Header | Source Link
+    // 3. Content in Blockquote
+    return `<b>🎬 ${platform} Media</b> | <a href="${sourceUrl}">Source</a>\n\n<blockquote>${safeText}</blockquote>`;
 };
 
 const handleMessage = async (ctx) => {
-    const text = ctx.message.text;
-    const match = text.match(config.URL_REGEX);
+    const messageText = ctx.message.text;
+    if (!messageText) return;
+
+    // 1. Find URL
+    const match = messageText.match(config.URL_REGEX);
     if (!match) return;
 
     const inputUrl = match[0];
-    
-    // --- NEW LOGIC: Extract User's Custom Caption ---
-    // Remove the URL from the full message text to get the caption
-    // Example: "https://link.com My Custom Text" -> "My Custom Text"
-    let userCaption = text.replace(inputUrl, '').trim();
+
+    // 2. Extract Custom Caption (Everything after the URL)
+    // Example: "https://link.com My Caption" -> "My Caption"
+    let customCaption = messageText.replace(inputUrl, '').trim();
 
     console.log(`📩 Request: ${inputUrl}`);
-    if(userCaption) console.log(`📝 Custom Caption: ${userCaption}`);
-
     const msg = await ctx.reply("🔍 *Analyzing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
@@ -49,20 +37,26 @@ const handleMessage = async (ctx) => {
 
         if (!media) throw new Error("Media not found");
 
-        const buttons = [];
-        
-        // Generate formatted caption
-        const captionText = getCaption(media, fullUrl, userCaption);
+        // 3. Determine Platform Name
+        let platform = 'Social';
+        if (fullUrl.includes('reddit')) platform = 'Reddit';
+        else if (fullUrl.includes('x.com') || fullUrl.includes('twitter')) platform = 'Twitter';
+        else if (fullUrl.includes('tiktok')) platform = 'TikTok';
+        else if (fullUrl.includes('instagram')) platform = 'Instagram';
 
-        // 1. Gallery
+        // 4. Generate Final Caption
+        // Logic: If User gave caption -> Use it. Else -> Use Media Title.
+        const finalContent = customCaption ? customCaption : (media.title || 'Media Content');
+        const htmlCaption = generateCaption(finalContent, platform, fullUrl);
+
+        // 5. Build Buttons
+        const buttons = [];
         if (media.type === 'gallery') {
             buttons.push([Markup.button.callback(`📥 Download Album`, `alb|all`)]);
         } 
-        // 2. Image
         else if (media.type === 'image') {
             buttons.push([Markup.button.callback(`🖼 Download Image`, `img|single`)]);
         } 
-        // 3. Video
         else if (media.type === 'video') {
             if (media.formats?.length > 0 && !fullUrl.includes('tiktok') && !fullUrl.includes('instagram')) {
                 const formats = media.formats.filter(f => f.ext === 'mp4' && f.height).sort((a,b) => b.height - a.height).slice(0, 5);
@@ -74,11 +68,11 @@ const handleMessage = async (ctx) => {
             if (buttons.length === 0) buttons.push([Markup.button.callback("📹 Download Video", `vid|best`)]);
             buttons.push([Markup.button.callback("🎵 Audio Only", "aud|best")]);
         }
-        
-        // Send the Preview with HTML Caption
+
+        // 6. Send Preview
         await ctx.telegram.editMessageText(
             ctx.chat.id, msg.message_id, null,
-            captionText, 
+            htmlCaption, 
             { 
                 parse_mode: 'HTML',
                 disable_web_page_preview: true,
