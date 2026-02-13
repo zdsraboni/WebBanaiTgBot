@@ -4,10 +4,8 @@ const config = require('./src/config/settings');
 const logger = require('./src/utils/logger');
 const db = require('./src/utils/db');
 
-// Services
+// Services & Handlers
 const poller = require('./src/services/poller'); 
-
-// Handlers
 const { 
     handleMessage, handleCallback, handleGroupMessage, 
     handleStart, handleHelp, handleConfig, handleEditCaption 
@@ -24,6 +22,7 @@ if (!fs.existsSync(config.DOWNLOAD_DIR)) {
 db.connect(); 
 
 // 2. Initialize Bot
+if (!config.BOT_TOKEN) throw new Error("BOT_TOKEN is missing in Environment Variables!");
 const bot = new Telegraf(config.BOT_TOKEN);
 
 // --- COMMANDS ---
@@ -37,19 +36,13 @@ bot.command('set_destination', handleConfig);
 
 // --- MESSAGE LOGIC ---
 bot.on('text', async (ctx, next) => {
-    // Check if user is editing a caption
     if (await handleEditCaption(ctx)) return;
-
-    // Handle Group Chats
     if (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') {
         return handleGroupMessage(ctx, () => handleMessage(ctx));
     }
-    
-    // Handle Private Chat Downloads
     return handleMessage(ctx);
 });
 
-// Callback handle logic
 bot.on('callback_query', handleCallback);
 
 // --- START SERVICES (Polling vs Webhook) ---
@@ -60,33 +53,30 @@ if (isProduction) {
     const webhookPath = `/bot${config.BOT_TOKEN}`;
     const webhookUrl = `${config.APP_URL}${webhookPath}`;
     
+    // ৪২৯ এরর হ্যান্ডলিং লজিক
     bot.telegram.setWebhook(webhookUrl)
-        .then(() => console.log(`🚀 Webhook Successfully Set: ${webhookUrl}`))
-        .catch(err => console.error(`❌ Webhook Error: ${err.message}`));
+        .then(() => console.log(`🚀 Webhook Link Active: ${webhookUrl}`))
+        .catch(err => {
+            if (err.response && err.response.error_code === 429) {
+                console.log("⚠️ Telegram Rate Limit (429). Bot is already using the existing webhook.");
+            } else {
+                console.error(`❌ Webhook Error: ${err.message}`);
+            }
+        });
 
-    /**
-     * পোর্ট সংঘর্ষ এড়াতে:
-     * bot.startWebhook() এখানে কল করা যাবে না। 
-     * আমরা setupServer() এর Express এপ্লিকেশন ব্যবহার করে একই পোর্টে 
-     * Webhook এবং Web Console চালাবো।
-     */
+    // Web Console এবং Webhook এক সাথে চালানোর জন্য
     setupServer(bot, webhookPath); 
 } else {
-    // Local Testing Mode
+    // Local Testing
     poller.init(bot);
-    setupServer(bot); // লোকাল ওয়েব কনসোল
+    setupServer(bot); 
 }
 
-// --- SAFE SHUTDOWN (Fixes "Bot is not running" error) ---
+// --- SAFE SHUTDOWN ---
 const stopBot = (signal) => {
-    console.log(`Stopping system via ${signal}...`);
-    if (!isProduction) {
-        // Polling thakle bot stop korbe
-        bot.stop(signal);
-    } else {
-        // Webhook mode-e bot stop korar proyojon nei, sudhu process exit korlei hobe
-        process.exit(0);
-    }
+    console.log(`Stopping via ${signal}...`);
+    if (!isProduction) bot.stop(signal);
+    else process.exit(0);
 };
 
 process.once('SIGINT', () => stopBot('SIGINT'));
