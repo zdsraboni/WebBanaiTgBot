@@ -9,13 +9,8 @@ const poller = require('./src/services/poller');
 
 // Handlers
 const { 
-    handleMessage, 
-    handleCallback, 
-    handleGroupMessage, 
-    handleStart, 
-    handleHelp, 
-    handleConfig,
-    handleEditCaption 
+    handleMessage, handleCallback, handleGroupMessage, 
+    handleStart, handleHelp, handleConfig, handleEditCaption 
 } = require('./src/utils/handlers');
 
 const { handleStats, handleBroadcast } = require('./src/utils/admin'); 
@@ -23,7 +18,9 @@ const { setupServer } = require('./src/server/web');
 
 // 1. Initialize System
 logger.init();
-if (!fs.existsSync(config.DOWNLOAD_DIR)) fs.mkdirSync(config.DOWNLOAD_DIR, { recursive: true });
+if (!fs.existsSync(config.DOWNLOAD_DIR)) {
+    fs.mkdirSync(config.DOWNLOAD_DIR, { recursive: true });
+}
 db.connect(); 
 
 // 2. Initialize Bot
@@ -40,57 +37,57 @@ bot.command('set_destination', handleConfig);
 
 // --- MESSAGE LOGIC ---
 bot.on('text', async (ctx, next) => {
-    // Check Caption Editor first
+    // Check if user is editing a caption
     if (await handleEditCaption(ctx)) return;
 
-    // Group Chat logic
+    // Handle Group Chats
     if (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') {
         return handleGroupMessage(ctx, () => handleMessage(ctx));
     }
     
-    // Private Chat logic
+    // Handle Private Chat Downloads
     return handleMessage(ctx);
 });
 
-// --- CALLBACKS ---
+// Callback handle logic
 bot.on('callback_query', handleCallback);
 
 // --- START SERVICES (Polling vs Webhook) ---
 const isProduction = process.env.NODE_ENV === 'production';
 
 if (isProduction) {
-    // Railway-তে Webhook চালু করার সঠিক নিয়ম
-    const webhookPath = '/bot' + config.BOT_TOKEN;
+    // Railway Webhook Setup
+    const webhookPath = `/bot${config.BOT_TOKEN}`;
     const webhookUrl = `${config.APP_URL}${webhookPath}`;
     
     bot.telegram.setWebhook(webhookUrl)
-        .then(() => {
-            console.log(`🚀 Webhook Engine Started: ${webhookUrl}`);
-        })
-        .catch((err) => {
-            console.error(`❌ Webhook Error: ${err.message}`);
-        });
-        
-    // Express Server-এর সাথে Webhook সংযুক্ত করা
-    bot.startWebhook(webhookPath, null, config.PORT);
+        .then(() => console.log(`🚀 Webhook Successfully Set: ${webhookUrl}`))
+        .catch(err => console.error(`❌ Webhook Error: ${err.message}`));
+
+    /**
+     * পোর্ট সংঘর্ষ এড়াতে:
+     * bot.startWebhook() এখানে কল করা যাবে না। 
+     * আমরা setupServer() এর Express এপ্লিকেশন ব্যবহার করে একই পোর্টে 
+     * Webhook এবং Web Console চালাবো।
+     */
+    setupServer(bot, webhookPath); 
 } else {
-    // লোকাল এনভায়রনমেন্টে পোলিং চলবে
+    // Local Testing Mode
     poller.init(bot);
+    setupServer(bot); // লোকাল ওয়েব কনসোল
 }
 
-// --- SAFE SHUTDOWN LOGIC (Fixes "Bot is not running!" error) ---
+// --- SAFE SHUTDOWN (Fixes "Bot is not running" error) ---
 const stopBot = (signal) => {
-    console.log(`Stopping bot via ${signal}...`);
-    // পোলিং চললে শুধু তখনই স্টপ করবে, নাহলে প্রসেস এক্সিট করবে
+    console.log(`Stopping system via ${signal}...`);
     if (!isProduction) {
+        // Polling thakle bot stop korbe
         bot.stop(signal);
     } else {
+        // Webhook mode-e bot stop korar proyojon nei, sudhu process exit korlei hobe
         process.exit(0);
     }
 };
 
 process.once('SIGINT', () => stopBot('SIGINT'));
 process.once('SIGTERM', () => stopBot('SIGTERM'));
-
-// --- WEB CONSOLE SETUP ---
-setupServer(bot);
