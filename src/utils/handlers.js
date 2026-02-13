@@ -67,75 +67,59 @@ const handleConfig = async (ctx) => {
     }
 };
 
-// --- ✅ NEW: CAPTION EDITOR ---
+// --- CAPTION EDITOR ---
 const handleEditCaption = async (ctx) => {
     const text = ctx.message.text;
-    
-    // Only run if command is /caption
     if (!text || !text.startsWith('/caption')) return false;
-
-    // Check Reply
     if (!ctx.message.reply_to_message) {
         await ctx.reply("⚠️ Reply to a message to edit it.", { reply_to_message_id: ctx.message.message_id });
         return true; 
     }
-
-    // Check Bot Ownership (Can only edit own messages)
     if (ctx.message.reply_to_message.from.id !== ctx.botInfo.id) {
         await ctx.reply("⚠️ I can only edit my own messages.", { reply_to_message_id: ctx.message.message_id });
         return true;
     }
-
-    // Extract New Text
     const newCaption = text.replace(/^\/caption\s*/, '').trim();
     if (!newCaption) {
         await ctx.reply("⚠️ Usage: <code>/caption New Title Here</code>", { parse_mode: 'HTML', reply_to_message_id: ctx.message.message_id });
         return true;
     }
-
     try {
-        // Edit the caption
-        // We assume we want to keep the buttons (like translation buttons) if they exist
-        const extra = {
-            parse_mode: 'HTML',
-            reply_markup: ctx.message.reply_to_message.reply_markup
-        };
-
-        await ctx.telegram.editMessageCaption(
-            ctx.chat.id,
-            ctx.message.reply_to_message.message_id,
-            null,
-            newCaption,
-            extra
-        );
-
-        // Feedback & Cleanup
-        await ctx.deleteMessage().catch(()=>{}); // Delete the /caption command
+        const extra = { parse_mode: 'HTML', reply_markup: ctx.message.reply_to_message.reply_markup };
+        await ctx.telegram.editMessageCaption(ctx.chat.id, ctx.message.reply_to_message.message_id, null, newCaption, extra);
+        await ctx.deleteMessage().catch(()=>{}); 
         const confirm = await ctx.reply("✅ Updated!");
         setTimeout(() => ctx.telegram.deleteMessage(ctx.chat.id, confirm.message_id).catch(()=>{}), 2000);
-
     } catch (e) {
         await ctx.reply(`❌ Error: ${e.description}`, { reply_to_message_id: ctx.message.message_id });
     }
-    
-    return true; // Stop other handlers
+    return true; 
 };
 
-// --- DOWNLOADER ---
-const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionText, userMsgId) => {
+// --- ✅ UPDATED: DOWNLOADER (Handles Image/Video/Audio) ---
+const performDownload = async (ctx, url, type, qualityId, botMsgId, captionText, userMsgId) => {
     try {
         if (userMsgId && userMsgId !== 0) { try { await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId); } catch (err) {} }
         try { await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⏳ <b>Downloading...</b>", { parse_mode: 'HTML' }); } catch (e) {}
 
         const timestamp = Date.now();
         const basePath = path.join(config.DOWNLOAD_DIR, `${timestamp}`);
-        const finalFile = `${basePath}.${isAudio ? 'mp3' : 'mp4'}`;
+        
+        // এক্সটেনশন নির্ধারণ
+        let ext = 'mp4';
+        if (type === 'audio') ext = 'mp3';
+        if (type === 'image') ext = 'jpg';
+        
+        const finalFile = `${basePath}.${ext}`;
 
-        await downloader.download(url, isAudio, qualityId, basePath);
+        // ডাউনলোডার কল করা (নতুন টাইপ সিস্টেম সহ)
+        await downloader.download(url, type, qualityId, basePath);
 
         let filesToSend = [finalFile];
         const stats = fs.statSync(finalFile);
-        if (!isAudio && stats.size > 49.5 * 1024 * 1024) {
+        
+        // ভিডিও ফাইল বড় হলে স্প্লিট করা
+        if (type === 'video' && stats.size > 49.5 * 1024 * 1024) {
             await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⚠️ <b>File > 50MB. Splitting...</b>", { parse_mode: 'HTML' });
             try { filesToSend = await downloader.splitFile(finalFile); } 
             catch (e) { return await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "❌ Split failed.", { parse_mode: 'HTML' }); }
@@ -146,19 +130,23 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
             
             if (i === 0) {
                 try {
+                    // মিডিয়া টাইপ অনুযায়ী টেলিগ্রামে পাঠানো
+                    let mediaType = type === 'audio' ? 'audio' : (type === 'image' ? 'photo' : 'video');
+                    
                     await ctx.telegram.editMessageMedia(
                         ctx.chat.id, botMsgId, null,
-                        { type: isAudio ? 'audio' : 'video', media: { source: file }, caption: captionText, parse_mode: 'HTML' },
+                        { type: mediaType, media: { source: file }, caption: captionText, parse_mode: 'HTML' },
                         { ...getTranslationButtons().reply_markup } 
                     );
                 } catch (editError) {
                     await ctx.telegram.deleteMessage(ctx.chat.id, botMsgId).catch(()=>{});
-                    if (isAudio) await ctx.replyWithAudio({ source: file }, { caption: captionText, parse_mode: 'HTML', ...getTranslationButtons() });
+                    if (type === 'audio') await ctx.replyWithAudio({ source: file }, { caption: captionText, parse_mode: 'HTML', ...getTranslationButtons() });
+                    else if (type === 'image') await ctx.replyWithPhoto({ source: file }, { caption: captionText, parse_mode: 'HTML', ...getTranslationButtons() });
                     else await ctx.replyWithVideo({ source: file }, { caption: captionText, parse_mode: 'HTML', ...getTranslationButtons() });
                 }
             } else {
                 let partCaption = captionText + `\n\n🧩 <b>Part ${i + 1}</b>`;
-                if (isAudio) await ctx.replyWithAudio({ source: file }, { caption: partCaption, parse_mode: 'HTML' });
+                if (type === 'audio') await ctx.replyWithAudio({ source: file }, { caption: partCaption, parse_mode: 'HTML' });
                 else await ctx.replyWithVideo({ source: file }, { caption: partCaption, parse_mode: 'HTML' });
             }
             if (fs.existsSync(file)) fs.unlinkSync(file);
@@ -175,8 +163,8 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
         try { await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, `${errorMsg}\n\nLog: \`${e.message.substring(0, 50)}...\``, { parse_mode: 'Markdown' }); } 
         catch { await ctx.reply(`${errorMsg}`, { parse_mode: 'Markdown' }); }
         
-        const basePath = path.join(config.DOWNLOAD_DIR, `${Date.now()}`);
         if (fs.existsSync(`${basePath}.mp4`)) fs.unlinkSync(`${basePath}.mp4`);
+        if (fs.existsSync(`${basePath}.jpg`)) fs.unlinkSync(`${basePath}.jpg`);
     }
 };
 
@@ -300,8 +288,13 @@ const handleCallback = async (ctx) => {
 
     if (!url) return ctx.answerCbQuery("Expired. Send link again.");
 
-    if (action === 'img') { await ctx.answerCbQuery("Sending..."); await ctx.replyWithPhoto(url); await ctx.deleteMessage(); }
-    else await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, ctx.callbackQuery.message.caption, null);
+    // ডাউনলোডের ধরণ নির্ধারণ করা
+    let type = 'video';
+    if (action === 'aud') type = 'audio';
+    if (action === 'img') type = 'image';
+    if (action === 'alb') type = 'gallery';
+
+    await performDownload(ctx, url, type, id, ctx.callbackQuery.message.message_id, ctx.callbackQuery.message.caption, null);
 };
 
 // Export ALL handlers
