@@ -1,6 +1,7 @@
 const { exec } = require('child_process');
 const util = require('util');
 const fs = require('fs');
+const axios = require('axios'); // ইমেজ ডাউনলোডের জন্য প্রয়োজনীয়
 const config = require('../config/settings');
 
 const execPromise = util.promisify(exec);
@@ -10,14 +11,14 @@ class Downloader {
         this.initCookies();
     }
 
-    // Load and repair cookies from Render Environment
+    // Render Environment থেকে কুকি লোড এবং রিপেয়ার করা
     initCookies() {
         if (process.env.REDDIT_COOKIES) {
             let rawData = process.env.REDDIT_COOKIES;
-            // Repair newlines broken by Render
+            // Render দ্বারা ভেঙে যাওয়া নিউলাইন ঠিক করা
             rawData = rawData.replace(/\\n/g, '\n').replace(/ /g, '\t').replace(/#HttpOnly_/g, '');
             
-            // Add header if missing
+            // হেডার না থাকলে যোগ করা
             if (!rawData.startsWith('# Netscape')) {
                 rawData = "# Netscape HTTP Cookie File\n" + rawData;
             }
@@ -27,21 +28,21 @@ class Downloader {
         }
     }
 
-    // Helper to run yt-dlp commands
+    // yt-dlp কমান্ড রান করার হেল্পার ফাংশন
     async execute(args) {
         let cmd = `yt-dlp --force-ipv4 --no-warnings --no-playlist ${args}`;
         
-        // Force User-Agent for all commands
+        // সব কমান্ডের জন্য User-Agent ফোর্স করা
         cmd += ` --user-agent "${config.UA_ANDROID}"`;
         
-        // Use Cookies if they exist
+        // কুকি ফাইল থাকলে তা ব্যবহার করা
         if (fs.existsSync(config.COOKIE_PATH)) {
             cmd += ` --cookies "${config.COOKIE_PATH}"`;
         }
         return await execPromise(cmd);
     }
 
-    // Get Resolution List (JSON Metadata)
+    // রেজোলিউশন লিস্ট (JSON মেটাডেটা) সংগ্রহ করা
     async getInfo(url) {
         try {
             const { stdout } = await this.execute(`-J "${url}"`);
@@ -51,18 +52,50 @@ class Downloader {
         }
     }
 
-    // Download File
-    async download(url, isAudio, formatId, outputPath) {
-        let typeArg = "";
-        
-        if (isAudio) {
-            typeArg = `-x --audio-format mp3 -o "${outputPath}.%(ext)s"`;
-        } else {
-            // If 'best' is requested (fallback mode), let yt-dlp decide
-            // Otherwise use specific format + best audio
-            const fmt = formatId === 'best' ? 'best' : `${formatId}+bestaudio/best`;
-            typeArg = `-f "${fmt}" --merge-output-format mp4 -o "${outputPath}.%(ext)s"`;
+    /**
+     * মিডিয়া ফাইল ডাউনলোড করার মূল ফাংশন
+     * @param {string} url - মিডিয়া ইউআরএল
+     * @param {string} type - 'image', 'audio', অথবা 'video'
+     * @param {string} formatId - ভিডিও ফরম্যাট আইডি (ইমেজের জন্য 'best' বা null দিতে পারেন)
+     * @param {string} outputPath - ফাইল সেভ করার পাথ (এক্সটেনশন ছাড়া)
+     */
+    async download(url, type, formatId, outputPath) {
+        // ১. ইমেজ ডাউনলোডের লজিক (নতুন যুক্ত করা হয়েছে)
+        if (type === 'image') {
+            try {
+                const response = await axios({
+                    url: url,
+                    method: 'GET',
+                    responseType: 'stream',
+                    headers: {
+                        'User-Agent': config.UA_ANDROID
+                    }
+                });
+
+                const writer = fs.createWriteStream(`${outputPath}.jpg`);
+                response.data.pipe(writer);
+
+                return new Promise((resolve, reject) => {
+                    writer.on('finish', resolve);
+                    writer.on('error', reject);
+                });
+            } catch (error) {
+                throw new Error(`Image Download Failed: ${error.message}`);
+            }
         }
+
+        // ২. অডিও ডাউনলোডের লজিক
+        if (type === 'audio') {
+            const typeArg = `-x --audio-format mp3 -o "${outputPath}.%(ext)s"`;
+            await this.execute(`${typeArg} "${url}"`);
+            return;
+        }
+
+        // ৩. ভিডিও ডাউনলোডের লজিক
+        // যদি 'best' রিকোয়েস্ট করা হয়, তবে yt-dlp কে সিদ্ধান্ত নিতে দিন
+        // অন্যথায় নির্দিষ্ট ফরম্যাট + বেস্ট অডিও মার্জ করুন
+        const fmt = formatId === 'best' ? 'best' : `${formatId}+bestaudio/best`;
+        const typeArg = `-f "${fmt}" --merge-output-format mp4 -o "${outputPath}.%(ext)s"`;
         
         await this.execute(`${typeArg} "${url}"`);
     }
