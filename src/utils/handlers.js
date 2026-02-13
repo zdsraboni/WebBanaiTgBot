@@ -95,7 +95,6 @@ const handleEditCaption = async (ctx) => {
 
     try {
         // Edit the caption
-        // We assume we want to keep the buttons (like translation buttons) if they exist
         const extra = {
             parse_mode: 'HTML',
             reply_markup: ctx.message.reply_to_message.reply_markup
@@ -123,22 +122,29 @@ const handleEditCaption = async (ctx) => {
 
 // --- DOWNLOADER ---
 const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionText, userMsgId) => {
+    let finalFile = "";
+    let filesToSend = [];
     try {
         if (userMsgId && userMsgId !== 0) { try { await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId); } catch (err) {} }
         try { await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⏳ <b>Downloading...</b>", { parse_mode: 'HTML' }); } catch (e) {}
 
         const timestamp = Date.now();
         const basePath = path.join(config.DOWNLOAD_DIR, `${timestamp}`);
-        const finalFile = `${basePath}.${isAudio ? 'mp3' : 'mp4'}`;
+        finalFile = `${basePath}.${isAudio ? 'mp3' : 'mp4'}`;
 
         await downloader.download(url, isAudio, qualityId, basePath);
 
-        let filesToSend = [finalFile];
+        filesToSend = [finalFile];
         const stats = fs.statSync(finalFile);
+        
+        // Telegram 50MB Limit Fix
         if (!isAudio && stats.size > 49.5 * 1024 * 1024) {
             await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⚠️ <b>File > 50MB. Splitting...</b>", { parse_mode: 'HTML' });
-            try { filesToSend = await downloader.splitFile(finalFile); } 
-            catch (e) { return await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "❌ Split failed.", { parse_mode: 'HTML' }); }
+            try { 
+                filesToSend = await downloader.splitFile(finalFile); 
+            } catch (e) { 
+                return await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "❌ Split failed.", { parse_mode: 'HTML' }); 
+            }
         }
 
         for (let i = 0; i < filesToSend.length; i++) {
@@ -161,8 +167,12 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
                 if (isAudio) await ctx.replyWithAudio({ source: file }, { caption: partCaption, parse_mode: 'HTML' });
                 else await ctx.replyWithVideo({ source: file }, { caption: partCaption, parse_mode: 'HTML' });
             }
+            // Cleanup each file/part after sending
             if (fs.existsSync(file)) fs.unlinkSync(file);
         }
+
+        // Cleanup the original large file if it was split and not already deleted
+        if (filesToSend.length > 1 && fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
 
         const userId = ctx.callbackQuery ? ctx.callbackQuery.from.id : (ctx.message ? ctx.message.from.id : null);
         if (userId) db.incrementDownloads(userId);
@@ -175,8 +185,11 @@ const performDownload = async (ctx, url, isAudio, qualityId, botMsgId, captionTe
         try { await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, `${errorMsg}\n\nLog: \`${e.message.substring(0, 50)}...\``, { parse_mode: 'Markdown' }); } 
         catch { await ctx.reply(`${errorMsg}`, { parse_mode: 'Markdown' }); }
         
-        const basePath = path.join(config.DOWNLOAD_DIR, `${Date.now()}`);
-        if (fs.existsSync(`${basePath}.mp4`)) fs.unlinkSync(`${basePath}.mp4`);
+        // Final Error Cleanup
+        if (finalFile && fs.existsSync(finalFile)) fs.unlinkSync(finalFile);
+        if (filesToSend.length > 1) {
+            filesToSend.forEach(f => { if(fs.existsSync(f)) fs.unlinkSync(f); });
+        }
     }
 };
 
@@ -206,7 +219,7 @@ const handleMessage = async (ctx) => {
                 const info = await downloader.getInfo(fullUrl);
                 media = { title: info.title || 'Twitter Media', author: info.uploader || 'Twitter User', source: fullUrl, type: 'video', url: fullUrl, thumbnail: info.thumbnail, formats: info.formats || [] };
             } catch (e) { media = await twitterService.extract(fullUrl); }
-        } else if (fullUrl.includes('reddit.com')) {
+        } else if (fullUrl.includes('reddit.com') || fullUrl.includes('redd.it')) {
             media = await redditService.extract(fullUrl);
             platformName = 'Reddit';
         } else {
