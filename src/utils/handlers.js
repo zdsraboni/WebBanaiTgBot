@@ -106,29 +106,32 @@ const handleEditCaption = async (ctx) => {
     return true;
 };
 
-// --- ✅ UPDATED DOWNLOADER (Handles Type properly) ---
+// --- DOWNLOADER (এই লাইনের নিচ থেকে শুরু করুন) ---
 const performDownload = async (ctx, url, type, qualityId, botMsgId, htmlCaption, userMsgId) => {
+    let basePath = ''; // ফিক্স: এখানে ডিক্লেয়ার করা হয়েছে যাতে catch ব্লক এটি দেখতে পায়
     try {
-        if (userMsgId && userMsgId !== 0) { try { await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId); } catch (err) {} }
-        try { await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⏳ <b>Downloading...</b>", { parse_mode: 'HTML' }); } catch (e) {}
+        if (userMsgId && userMsgId !== 0) { 
+            try { await ctx.telegram.deleteMessage(ctx.chat.id, userMsgId); } catch (err) {} 
+        }
+        
+        try { 
+            await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⏳ <b>Downloading...</b>", { parse_mode: 'HTML' }); 
+        } catch (e) {}
 
         const timestamp = Date.now();
-        const basePath = path.join(config.DOWNLOAD_DIR, `${timestamp}`);
+        basePath = path.join(config.DOWNLOAD_DIR, `${timestamp}`);
         
-        // টাইপ অনুযায়ী এক্সটেনশন সেট করা
         let ext = 'mp4';
         if (type === 'audio') ext = 'mp3';
         if (type === 'image') ext = 'jpg';
         
         const finalFile = `${basePath}.${ext}`;
 
-        // ডাউনলোডার কল করা (টাইপ অনুযায়ী)
         await downloader.download(url, type, qualityId, basePath);
 
         let filesToSend = [finalFile];
         const stats = fs.statSync(finalFile);
         
-        // শুধু ভিডিওর জন্য স্প্লিট লজিক
         if (type === 'video' && stats.size > 49.5 * 1024 * 1024) {
             await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, "⚠️ <b>File > 50MB. Splitting...</b>", { parse_mode: 'HTML' });
             try { filesToSend = await downloader.splitFile(finalFile); } 
@@ -140,7 +143,6 @@ const performDownload = async (ctx, url, type, qualityId, botMsgId, htmlCaption,
             
             if (i === 0) {
                 try {
-                    // টেলিগ্রাম মিডিয়া টাইপ সেট করা
                     let tgType = 'video';
                     if (type === 'audio') tgType = 'audio';
                     if (type === 'image') tgType = 'photo';
@@ -172,13 +174,21 @@ const performDownload = async (ctx, url, type, qualityId, botMsgId, htmlCaption,
         if (e.message.includes('403')) errorMsg = "❌ Error: Forbidden (Check Cookies)";
         if (e.message.includes('Sign in')) errorMsg = "❌ Error: Login Required (Check Cookies)";
         
-        try { await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, `${errorMsg}\n\nLog: \`${e.message.substring(0, 50)}...\``, { parse_mode: 'Markdown' }); } 
-        catch { await ctx.reply(`${errorMsg}`, { parse_mode: 'Markdown' }); }
+        try { 
+            await ctx.telegram.editMessageCaption(ctx.chat.id, botMsgId, null, `${errorMsg}\n\nLog: \`${e.message.substring(0, 50)}...\``, { parse_mode: 'Markdown' }); 
+        } catch { 
+            await ctx.reply(`${errorMsg}`, { parse_mode: 'Markdown' }); 
+        }
         
-        if (fs.existsSync(`${basePath}.mp4`)) fs.unlinkSync(`${basePath}.mp4`);
-        if (fs.existsSync(`${basePath}.jpg`)) fs.unlinkSync(`${basePath}.jpg`);
+        // ফিক্স: basePath ডিফাইন করা থাকলে ফাইল ক্লিনআপ করা
+        if (basePath) {
+            if (fs.existsSync(`${basePath}.mp4`)) fs.unlinkSync(`${basePath}.mp4`);
+            if (fs.existsSync(`${basePath}.jpg`)) fs.unlinkSync(`${basePath}.jpg`);
+            if (fs.existsSync(`${basePath}.mp3`)) fs.unlinkSync(`${basePath}.mp3`);
+        }
     }
 };
+// --- এখানে শেষ (এর নিচেই handleMessage ফাংশন শুরু হবে) ---
 
 const handleMessage = async (ctx) => {
     db.addUser(ctx);
