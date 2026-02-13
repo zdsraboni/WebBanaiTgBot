@@ -26,7 +26,7 @@ const getTranslationButtons = () => {
     return Markup.inlineKeyboard([[Markup.button.callback('🇺🇸 English', 'trans|en'), Markup.button.callback('🇧🇩 Bangla', 'trans|bn')]]);
 };
 
-// --- START & HELP ---
+// --- START & HELP HANDLERS ---
 const handleStart = async (ctx) => {
     db.addUser(ctx);
     const text = `👋 <b>Welcome to Media Banai!</b>\nI can download from Twitter, Reddit, Instagram & TikTok.\n\n<b>Features:</b>\n• Auto-Split Large Files (50MB+)\n• Video/Image/GIF/Album Support\n• Translation & Custom Captions`;
@@ -167,7 +167,7 @@ const handleMessage = async (ctx) => {
     const postText = parts[1].trim(); 
     let flagEmoji = (preText.length === 2 && /^[a-zA-Z]+$/.test(preText)) ? getFlagEmoji(preText) : '🇧🇩';
 
-    const msg = await ctx.reply("🔍 *Analyzing...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
+    const msg = await ctx.reply("🔍 *Analyzing media...*", { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id });
 
     try {
         const fullUrl = await resolveRedirect(inputUrl);
@@ -178,10 +178,13 @@ const handleMessage = async (ctx) => {
             platformName = 'Twitter';
             try {
                 const info = await downloader.getInfo(fullUrl);
-                // Video check logic for Twitter
-                const isVideo = info.vcodec && info.vcodec !== 'none';
+                // Image vs Video detection fix
+                const isVideo = (info.vcodec && info.vcodec !== 'none') || info.ext === 'gif';
                 media = { title: info.title || 'Twitter Media', source: fullUrl, type: isVideo ? 'video' : 'image', url: info.url, thumbnail: info.thumbnail, formats: info.formats || [] };
-            } catch (e) { media = await twitterService.extract(fullUrl); }
+            } catch (e) { 
+                const mirrorUrl = fullUrl.replace('x.com', 'vxtwitter.com').replace('twitter.com', 'vxtwitter.com');
+                media = { title: "Twitter Media", source: fullUrl, type: 'image', url: mirrorUrl };
+            }
         } else if (fullUrl.includes('reddit.com') || fullUrl.includes('redd.it')) {
             media = await redditService.extract(fullUrl);
             platformName = 'Reddit';
@@ -213,7 +216,7 @@ const handleMessage = async (ctx) => {
 
         const menuMarkup = Markup.inlineKeyboard([...buttons, ...getTranslationButtons().reply_markup.inline_keyboard]);
 
-        if (media.thumbnail || (media.type === 'image' && media.url)) {
+        if (media.thumbnail || media.type === 'image') {
             await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(()=>{});
             await ctx.replyWithPhoto(media.url || media.thumbnail, { caption: prettyCaption, parse_mode: 'HTML', ...menuMarkup });
         } else {
@@ -223,27 +226,30 @@ const handleMessage = async (ctx) => {
     } catch (e) { await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, "❌ Failed: " + e.message); }
 };
 
+// --- NICKNAME & GROUP HANDLER ---
 const handleGroupMessage = async (ctx, next) => {
+    if (!ctx.message || !ctx.message.text) return next();
     const messageText = ctx.message.text;
-    if (messageText && messageText.startsWith('/setnick')) {
+
+    if (messageText.startsWith('/setnick')) {
         const parts = messageText.split(' ');
-        if (parts.length < 2 || !ctx.message.reply_to_message) return ctx.reply("Usage: Reply + /setnick name");
+        if (parts.length < 2 || !ctx.message.reply_to_message) return ctx.reply("Usage: Reply to user + /setnick name");
         await db.setNickname(ctx.chat.id, parts[1].toLowerCase(), ctx.message.reply_to_message.from.id);
-        return ctx.reply(`✅ Saved: ${parts[1]}`);
+        return ctx.reply(`✅ Saved Nickname: <b>${parts[1]}</b>`, { parse_mode: 'HTML' });
     }
-    if (messageText && messageText.startsWith('/delnick')) {
+    if (messageText.startsWith('/delnick')) {
         const parts = messageText.split(' ');
-        if (parts.length < 2) return;
-        await db.deleteNickname(ctx.chat.id, parts[1]);
-        return ctx.reply(`🗑 Deleted: ${parts[1]}`);
+        if (parts.length < 2) return ctx.reply("Usage: /delnick name");
+        await db.deleteNickname(ctx.chat.id, parts[1].toLowerCase());
+        return ctx.reply(`🗑 Deleted Nickname: <b>${parts[1]}</b>`, { parse_mode: 'HTML' });
     }
-    if (messageText) {
-        const nickEntry = await db.getNickname(ctx.chat.id, messageText.trim().toLowerCase());
-        if (nickEntry) {
-            try { await ctx.deleteMessage(); } catch(e){}
-            await ctx.reply(`👋 <b>${ctx.from.first_name}</b> mentioned <a href="tg://user?id=${nickEntry.targetId}">User</a>`, { parse_mode: 'HTML' });
-            return;
-        }
+    
+    // Check if message is a saved nickname
+    const nickEntry = await db.getNickname(ctx.chat.id, messageText.trim().toLowerCase());
+    if (nickEntry) {
+        try { await ctx.deleteMessage().catch(()=>{}); } catch(e){}
+        await ctx.reply(`👋 <b>${ctx.from.first_name}</b> mentioned <a href="tg://user?id=${nickEntry.targetId}">User</a>`, { parse_mode: 'HTML' });
+        return;
     }
     return next();
 };
@@ -253,24 +259,29 @@ const handleCallback = async (ctx) => {
     const [action, id] = ctx.callbackQuery.data.split('|');
     if (action === 'help_msg') return handleHelp(ctx);
     if (action === 'start_msg') return handleStart(ctx);
-    if (action === 'stats_msg') return ctx.answerCbQuery("Use /stats", { show_alert: true });
+    if (action === 'stats_msg') return ctx.answerCbQuery("Use /stats command", { show_alert: true });
     
     const entities = ctx.callbackQuery.message.caption_entities || ctx.callbackQuery.message.entities;
     const url = entities?.find(e => e.type === 'text_link')?.url;
 
     if (action === 'trans') {
         const msg = ctx.callbackQuery.message.caption;
-        if (!msg) return ctx.answerCbQuery("No text");
+        if (!msg) return ctx.answerCbQuery("No text to translate");
         await ctx.answerCbQuery("Translating...");
         try {
-            const res = await translate(msg.split('\n').slice(2).join('\n') || msg, { to: id, autoCorrect: true });
+            const body = msg.split('\n').slice(2).join('\n') || msg;
+            const res = await translate(body, { to: id, autoCorrect: true });
             await ctx.editMessageCaption(generateCaption(res.text, 'Social', url || 'source', '🇧🇩'), { parse_mode: 'HTML', ...getTranslationButtons() });
-        } catch(e) { await ctx.answerCbQuery("Error"); }
+        } catch(e) { await ctx.answerCbQuery("Translation Error"); }
         return;
     }
 
-    if (!url) return ctx.answerCbQuery("Expired. Send link again.");
-    if (action === 'img') { await ctx.answerCbQuery("Sending..."); await ctx.replyWithPhoto(url).catch(() => ctx.replyWithDocument(url)); await ctx.deleteMessage().catch(()=>{}); }
+    if (!url) return ctx.answerCbQuery("Expired. Please send the link again.");
+    if (action === 'img') { 
+        await ctx.answerCbQuery("Sending Image..."); 
+        await ctx.replyWithPhoto(url).catch(() => ctx.replyWithDocument(url)); 
+        await ctx.deleteMessage().catch(()=>{}); 
+    }
     else await performDownload(ctx, url, action === 'aud', id, ctx.callbackQuery.message.message_id, ctx.callbackQuery.message.caption, null);
 };
 
